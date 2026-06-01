@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16
+    container_name: diagramador-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-diagramador}
+      POSTGRES_USER: ${POSTGRES_USER:-diagramador}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-diagramador}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-diagramador} -d ${POSTGRES_DB:-diagramador}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: diagramador-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    ports:
+      - "80:8000"
+      - "8787:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/uploads:/app/uploads
+      - ./backend/firebase-service-account.json:/app/firebase-service-account.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: diagramador-frontend
+    restart: unless-stopped
+    ports:
+      - "5656:5656"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

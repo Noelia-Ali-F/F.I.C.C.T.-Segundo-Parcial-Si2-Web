@@ -1,0 +1,38 @@
+:root {
+  --font-display: "Trebuchet MS", "Segoe UI", sans-serif;
+  --font-body: "Trebuchet MS", "Segoe UI", sans-serif;
+  --accent: #d8ad20;
+  --accent-dark: #b5880a;
+  --text-primary: #173b72;
+  --text-secondary: #56627a;
+  --text-muted: #78839b;
+  color-scheme: light;
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  background:
+    radial-gradient(circle at top left, rgba(216, 173, 32, 0.2), transparent 18%),
+    radial-gradient(circle at 82% 14%, rgba(16, 72, 136, 0.2), transparent 20%),
+    linear-gradient(180deg, #f8f8f1 0%, #eef3fa 45%, #edf2f8 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: transparent;
+}
+
+a,
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}

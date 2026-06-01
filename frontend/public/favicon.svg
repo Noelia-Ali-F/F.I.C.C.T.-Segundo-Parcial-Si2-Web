@@ -1,0 +1,40 @@
+<svg width="88" height="88" viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="6" y="6" width="76" height="76" rx="24" fill="url(#brandGradient)"/>
+  <path
+    d="M23 56H18a4 4 0 0 1 0-8h8l8-13a8 8 0 0 1 6.8-3.9H55a8 8 0 0 1 6.3 3.1l7 8.5h3.7a5 5 0 0 1 5 5v6a4.4 4.4 0 0 1-4.4 4.3h-2.1"
+    fill="none"
+    stroke="#10386E"
+    stroke-width="4.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M40 28l12-8m-3 0h10v10"
+    fill="none"
+    stroke="#10386E"
+    stroke-width="4.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M33 56h18"
+    fill="none"
+    stroke="#10386E"
+    stroke-width="4.2"
+    stroke-linecap="round"
+  />
+  <circle cx="28" cy="58" r="7.4" fill="#10386E"/>
+  <circle cx="60" cy="58" r="7.4" fill="#10386E"/>
+  <circle cx="28" cy="58" r="2.8" fill="#F8F8F1"/>
+  <circle cx="60" cy="58" r="2.8" fill="#F8F8F1"/>
+  <path
+    d="M61 22c-2.5 0-4.6 2-4.6 4.5 0 .7.2 1.5.5 2.1L47 39.4l4.6 4.5 9.7-10.8c.7.3 1.4.5 2.2.5 2.5 0 4.5-2 4.5-4.5 0-2.5-2-4.5-4.5-4.5Zm-23.5 21 6.9 6.9-2.9 2.9a4.4 4.4 0 0 1-6.2 0l-1-1a4.4 4.4 0 0 1 0-6.2l3.2-2.6Z"
+    fill="#10386E"
+  />
+  <defs>
+    <linearGradient id="brandGradient" x1="16" y1="12" x2="70" y2="78" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F4CF46"/>
+      <stop offset="1" stop-color="#D8AD20"/>
+    </linearGradient>
+  </defs>
+</svg>

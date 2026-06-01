@@ -1,0 +1,9 @@
+fastapi>=0.135,<0.136
+uvicorn[standard]>=0.42,<0.43
+pydantic>=2.12,<3.0
+pydantic-settings>=2.11,<3.0
+sqlalchemy>=2.0,<2.1
+psycopg[binary]>=3.2,<3.3
+email-validator>=2.2,<3.0
+python-multipart>=0.0.9,<0.1
+firebase-admin>=6.0

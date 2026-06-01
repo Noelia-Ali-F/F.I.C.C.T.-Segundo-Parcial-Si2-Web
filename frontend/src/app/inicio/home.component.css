@@ -1,0 +1,666 @@
+.home-showcase {
+  width: min(1180px, calc(100% - 2rem));
+  margin: 1.25rem auto 0;
+  display: grid;
+  gap: 0;
+}
+
+.hero-banner {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0 0 28px 28px;
+  background:
+    linear-gradient(90deg, rgba(6, 39, 95, 0.9) 0%, rgba(17, 55, 115, 0.78) 45%, rgba(24, 46, 90, 0.36) 100%),
+    radial-gradient(circle at 78% 28%, rgba(255, 255, 255, 0.24), transparent 18%),
+    linear-gradient(180deg, #dadde2 0%, #c9d0dc 19%, #697796 54%, #d4d8de 100%);
+  box-shadow: 0 28px 60px rgba(15, 36, 71, 0.18);
+}
+
+.hero-overlay {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 18%, transparent 82%, rgba(255, 255, 255, 0.22)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.04) 0,
+      rgba(255, 255, 255, 0.04) 1px,
+      transparent 1px,
+      transparent 120px
+    );
+  pointer-events: none;
+}
+
+.hero-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 2rem;
+  padding: clamp(1.5rem, 3vw, 2.2rem);
+  align-items: start;
+}
+
+.hero-copy {
+  color: #fffaf1;
+}
+
+.hero-kicker,
+.card-eyebrow,
+.contact-kicker,
+.benefits-kicker {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hero-kicker {
+  color: #ffd249;
+}
+
+.hero-copy h1 {
+  max-width: 11ch;
+  margin: 0.4rem 0 1rem;
+  font-family: var(--font-display);
+  font-size: clamp(2.8rem, 5.2vw, 4.7rem);
+  line-height: 0.95;
+  letter-spacing: -0.05em;
+  text-shadow: 0 5px 18px rgba(6, 15, 36, 0.4);
+}
+
+.hero-intro {
+  max-width: 28rem;
+  margin: 0 0 1rem;
+  color: rgba(255, 250, 241, 0.88);
+  font-size: 1.08rem;
+  line-height: 1.6;
+  text-wrap: balance;
+}
+
+.hero-highlight {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0 0 1.5rem;
+  font-family: var(--font-display);
+  font-size: clamp(1.35rem, 2.8vw, 2.25rem);
+  font-weight: 800;
+  color: #ffd249;
+}
+
+.hero-highlight .light {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.register-card,
+.contact-card,
+.benefits-panel {
+  backdrop-filter: blur(10px);
+}
+
+.register-card {
+  max-width: 32rem;
+  padding: 1.7rem;
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(254, 249, 240, 0.96), rgba(243, 238, 230, 0.95));
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  color: #183261;
+  box-shadow: 0 18px 40px rgba(17, 37, 74, 0.24);
+}
+
+.card-eyebrow {
+  color: #cc9e16;
+}
+
+.register-card h2,
+.contact-card h2,
+.benefits-head h2 {
+  margin: 0.35rem 0 0.5rem;
+  font-family: var(--font-display);
+  line-height: 1.02;
+}
+
+.register-card h2 {
+  font-size: clamp(1.9rem, 3vw, 2.6rem);
+}
+
+.card-lead {
+  margin: 0 0 1.25rem;
+  color: #3d4a63;
+  font-size: 1.1rem;
+  line-height: 1.5;
+}
+
+.register-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.register-form label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.register-form label span {
+  color: #27457f;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.field-error {
+  color: #9f1239;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.register-form input,
+.register-form select,
+.map-field {
+  width: 100%;
+  padding: 0.95rem 1rem;
+  border-radius: 14px;
+  border: 1px solid rgba(40, 61, 97, 0.14);
+  background: rgba(255, 255, 255, 0.84);
+  color: #183261;
+  font: inherit;
+  outline: none;
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.register-form input:focus,
+.register-form select:focus {
+  border-color: rgba(216, 173, 32, 0.88);
+  box-shadow: 0 0 0 3px rgba(216, 173, 32, 0.16);
+  transform: translateY(-1px);
+}
+
+.map-field {
+  position: relative;
+  padding: 0.35rem;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(244, 239, 229, 0.92));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.map-field iframe {
+  display: block;
+  width: 100%;
+  min-height: 240px;
+  border: 0;
+  border-radius: 11px;
+}
+
+.workshop-map {
+  width: 100%;
+  min-height: 260px;
+  border-radius: 11px;
+}
+
+.map-locate-button {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  z-index: 500;
+  display: grid;
+  place-items: center;
+  width: 2.7rem;
+  height: 2.7rem;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(30, 79, 152, 0.96), rgba(22, 63, 121, 0.96));
+  color: #fffaf1;
+  font: inherit;
+  font-size: 1.35rem;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: 0 10px 18px rgba(17, 59, 114, 0.22);
+}
+
+.map-locate-button:disabled {
+  cursor: wait;
+  opacity: 0.78;
+}
+
+.map-meta {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.45rem;
+  color: #4d5c79;
+}
+
+.map-meta small {
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.map-meta strong {
+  font-size: 0.84rem;
+  color: #173b72;
+}
+
+.map-status.error {
+  color: #9f1239;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.full-width,
+.terms-copy,
+.form-actions {
+  grid-column: 1 / -1;
+}
+
+.terms-copy {
+  margin: 0.2rem 0 0;
+  color: #62708a;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.form-feedback {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  border-radius: 14px;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.form-feedback.error {
+  color: #9f1239;
+  background: rgba(244, 63, 94, 0.12);
+  border: 1px solid rgba(244, 63, 94, 0.2);
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.2rem;
+}
+
+.cta-primary,
+.cta-secondary,
+.contact-action {
+  text-decoration: none;
+}
+
+.cta-primary,
+.cta-secondary {
+  display: inline-flex;
+  border: 0;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  min-height: 3.2rem;
+  padding: 0.85rem 1.2rem;
+  border-radius: 16px;
+  font-weight: 800;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease;
+}
+
+.cta-primary {
+  background: linear-gradient(180deg, #ffd54f, #e0ad1f);
+  color: #133467;
+  box-shadow: 0 12px 24px rgba(217, 173, 32, 0.28);
+}
+
+.cta-secondary {
+  border: 1px solid rgba(24, 50, 97, 0.18);
+  background: rgba(17, 58, 119, 0.07);
+  color: #183261;
+}
+
+.cta-primary:hover,
+.cta-secondary:hover {
+  transform: translateY(-1px);
+}
+
+.cta-primary:disabled {
+  cursor: wait;
+  opacity: 0.7;
+  transform: none;
+  box-shadow: none;
+}
+
+.hero-side {
+  display: grid;
+  gap: 1rem;
+  align-content: end;
+  min-height: 100%;
+}
+
+.hero-side-copy {
+  max-width: 27rem;
+  margin-left: auto;
+  padding: 1.2rem 1.3rem 0.3rem;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(10, 31, 65, 0.36), rgba(10, 31, 65, 0.14));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(10px);
+}
+
+.hero-side-copy .hero-intro {
+  max-width: none;
+}
+
+.hero-side-copy .hero-highlight {
+  margin-bottom: 0;
+}
+
+.mechanic-spotlight {
+  position: relative;
+  min-height: 34rem;
+  display: grid;
+  align-items: end;
+}
+
+.spotlight-halo {
+  position: absolute;
+  right: 0.8rem;
+  top: 2rem;
+  width: min(28rem, 100%);
+  height: 28rem;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 221, 138, 0.4), rgba(255, 221, 138, 0) 68%);
+  filter: blur(14px);
+}
+
+.mechanic-card {
+  position: relative;
+  min-height: 32rem;
+  border-radius: 28px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02)),
+    linear-gradient(180deg, rgba(11, 41, 87, 0.22), rgba(9, 24, 58, 0.08));
+  overflow: hidden;
+}
+
+.mechanic-tag {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 2;
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(255, 212, 73, 0.96);
+  color: #133467;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mechanic-portrait {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(11, 31, 67, 0.06)),
+    linear-gradient(180deg, rgba(14, 43, 96, 0.08) 0%, rgba(13, 43, 96, 0.04) 52%, rgba(7, 29, 74, 0.36) 100%),
+    url('/mechanic-service-24-7.jpeg');
+  background-position:
+    center,
+    center,
+    center 22%;
+  background-repeat: no-repeat;
+  background-size:
+    cover,
+    cover,
+    cover;
+  opacity: 0.99;
+  filter: saturate(1.02) contrast(1.02);
+}
+
+.contact-card {
+  align-self: end;
+  max-width: 27rem;
+  margin-left: auto;
+  padding: 1.5rem;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 251, 243, 0.96), rgba(246, 240, 229, 0.95));
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 18px 40px rgba(17, 37, 74, 0.24);
+  color: #17315f;
+}
+
+.contact-kicker {
+  color: #c89b18;
+}
+
+.contact-card h2 {
+  font-size: clamp(1.9rem, 3vw, 2.7rem);
+}
+
+.contact-action {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.95rem 1rem;
+  border-radius: 18px;
+  color: #183261;
+  font-weight: 800;
+  box-shadow: inset 0 0 0 1px rgba(28, 55, 104, 0.08);
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.contact-action + .contact-action {
+  margin-top: 0.8rem;
+}
+
+.contact-action:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 0 0 1px rgba(28, 55, 104, 0.08),
+    0 12px 24px rgba(17, 37, 74, 0.14);
+}
+
+.contact-action.phone {
+  background: linear-gradient(180deg, #ffd34d, #eab225);
+}
+
+.contact-action.whatsapp {
+  background: linear-gradient(180deg, #51bd7d, #239755);
+  color: #f8fff9;
+}
+
+.contact-action .icon {
+  width: 2.8rem;
+  height: 2.8rem;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.2);
+  font-weight: 900;
+}
+
+.contact-text {
+  display: grid;
+}
+
+.contact-text strong {
+  font-size: 1.55rem;
+  line-height: 1;
+}
+
+.contact-text small {
+  margin-top: 0.2rem;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.benefits-panel {
+  display: grid;
+  gap: 1.4rem;
+  padding: 2rem clamp(1.3rem, 3vw, 2rem) 2.2rem;
+  background: linear-gradient(180deg, rgba(255, 248, 237, 0.96), rgba(247, 241, 230, 0.95));
+  border-radius: 0 0 28px 28px;
+  border-top: 1px solid rgba(19, 51, 103, 0.08);
+}
+
+.benefits-head {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.benefits-kicker {
+  color: #c89b18;
+}
+
+.benefits-head h2 {
+  font-size: clamp(2rem, 3vw, 2.85rem);
+  color: #17315f;
+}
+
+.benefits-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.benefit-card {
+  display: flex;
+  gap: 0.95rem;
+  align-items: start;
+  padding: 1rem 0.35rem 0.35rem 0;
+  color: #17315f;
+}
+
+.benefit-card + .benefit-card {
+  border-left: 1px solid rgba(23, 49, 95, 0.12);
+  padding-left: 1.1rem;
+}
+
+.benefit-icon {
+  width: 2.9rem;
+  height: 2.9rem;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #ffd34d, #e4ad1b);
+  color: #153362;
+  font-weight: 900;
+}
+
+.benefit-card h3 {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-display);
+  font-size: 1.55rem;
+}
+
+.benefit-card p {
+  margin: 0;
+  color: #465674;
+  font-size: 1.02rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 1024px) {
+  .hero-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-copy h1 {
+    max-width: 13ch;
+  }
+
+  .register-card,
+  .contact-card {
+    max-width: none;
+  }
+
+  .mechanic-spotlight {
+    min-height: 24rem;
+    order: -1;
+  }
+
+  .mechanic-card {
+    min-height: 24rem;
+  }
+
+  .contact-card {
+    margin-left: 0;
+  }
+
+  .benefits-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .benefit-card + .benefit-card {
+    border-left: 0;
+    border-top: 1px solid rgba(23, 49, 95, 0.12);
+    padding-left: 0;
+    padding-top: 1.1rem;
+  }
+}
+
+@media (max-width: 720px) {
+  .home-showcase {
+    width: calc(100% - 1rem);
+    margin-top: 0.5rem;
+  }
+
+  .hero-grid {
+    padding: 1rem;
+  }
+
+  .register-card,
+  .contact-card,
+  .benefits-panel {
+    border-radius: 22px;
+  }
+
+  .register-form {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-copy h1 {
+    font-size: 2.55rem;
+  }
+
+  .hero-intro {
+    font-size: 0.98rem;
+  }
+
+  .hero-highlight {
+    font-size: 1.3rem;
+  }
+
+  .mechanic-spotlight,
+  .mechanic-card {
+    min-height: 18rem;
+  }
+
+  .form-actions {
+    flex-direction: column;
+  }
+
+  .cta-primary,
+  .cta-secondary {
+    width: 100%;
+  }
+
+  .contact-action {
+    padding: 0.9rem;
+  }
+
+  .contact-text strong {
+    font-size: 1.25rem;
+  }
+}

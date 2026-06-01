@@ -1,0 +1,154 @@
+<article class="dashboard-panel dashboard-panel-wide">
+  <div class="technician-crud">
+    <div class="technician-crud-head">
+      <div>
+        <p class="dashboard-panel-kicker">Usuarios registrados</p>
+        <h2>Lista de Clientes</h2>
+      </div>
+      <button class="dashboard-refresh-button" type="button" (click)="loadClients()">Actualizar</button>
+    </div>
+
+    <section class="technician-table-card">
+      <p class="dashboard-loading" *ngIf="isClientsLoading">Cargando clientes...</p>
+      <p class="dashboard-empty" *ngIf="!isClientsLoading && !clients.length">No hay clientes registrados.</p>
+
+      <div class="dashboard-table-wrap technician-table-wrap" *ngIf="!isClientsLoading && clients.length">
+        <table class="dashboard-table dashboard-table-technicians">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Cliente</th>
+              <th>Carnet</th>
+              <th>Correo</th>
+              <th>Telefono</th>
+              <th>Rol</th>
+              <th>Estado</th>
+              <th>Registro</th>
+              <th>Opciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let client of clients">
+              <td data-label="ID"><span class="dashboard-id-chip">#{{ client.id }}</span></td>
+              <td data-label="Cliente">
+                <div class="dashboard-table-primary">
+                  <strong>{{ client.full_name }}</strong>
+                  <span>{{ client.accepted_terms ? 'Terminos aceptados' : 'Pendiente de terminos' }}</span>
+                </div>
+              </td>
+              <td data-label="Carnet">{{ client.identity_card }}</td>
+              <td data-label="Correo">{{ client.email }}</td>
+              <td data-label="Telefono">{{ client.phone }}</td>
+              <td data-label="Rol">{{ client.role }}</td>
+              <td data-label="Estado">
+                <button
+                  class="dashboard-status-pill dashboard-status-button"
+                  type="button"
+                  [attr.data-status]="client.status"
+                  [attr.aria-label]="'Cambiar estado de ' + client.full_name"
+                  (click)="toggleClientStatus(client)"
+                >
+                  <span class="dashboard-status-dot"></span>
+                  {{ clientStatusLabel(client.status) }}
+                </button>
+              </td>
+              <td data-label="Registro">{{ client.created_at | date: 'short' }}</td>
+              <td data-label="Opciones">
+                <div class="workshop-actions">
+                  <button class="technician-icon-button client-action-tooltip" type="button" (click)="editClient(client)" [attr.aria-label]="'Editar ' + client.full_name" data-tooltip="Editar">✎</button>
+                  <button class="technician-icon-button workshop-delete-button client-action-tooltip" type="button" (click)="deleteClient(client)" [attr.aria-label]="'Eliminar ' + client.full_name" data-tooltip="Eliminar">🗑</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</article>
+
+<div class="dashboard-modal-backdrop" *ngIf="showClientEditModal" (click)="cancelClientEdit()">
+  <section class="dashboard-modal-card" (click)="$event.stopPropagation()">
+    <div class="dashboard-modal-head">
+      <div>
+        <p class="dashboard-panel-kicker">Edición de cliente</p>
+        <h3>Actualizar cliente</h3>
+      </div>
+    </div>
+
+    <!--
+      AQUI ESTA EL FORMULARIO DE EDICION DE CLIENTES
+    -->
+    <form class="workshop-edit-form" (ngSubmit)="submitClientEdit()">
+      <label class="workshop-edit-field">
+        <span>Carnet</span>
+        <input type="text" name="identity_card" [(ngModel)]="clientForm.identity_card" required minlength="5" />
+      </label>
+      <label class="workshop-edit-field">
+        <span>Nombre completo</span>
+        <input type="text" name="full_name" [(ngModel)]="clientForm.full_name" required minlength="3" />
+      </label>
+      <label class="workshop-edit-field">
+        <span>Correo</span>
+        <input type="email" name="email" [(ngModel)]="clientForm.email" required />
+      </label>
+      <label class="workshop-edit-field">
+        <span>Telefono</span>
+        <input type="text" name="phone" [(ngModel)]="clientForm.phone" required minlength="7" />
+      </label>
+      <label class="workshop-edit-field">
+        <span>Nueva contraseña</span>
+        <input type="password" name="password" [(ngModel)]="clientForm.password" minlength="6" placeholder="Dejar vacio para mantener la actual" />
+      </label>
+      <label class="workshop-edit-field">
+        <span>Rol</span>
+        <input type="text" name="role" [(ngModel)]="clientForm.role" required minlength="2" />
+      </label>
+      <label class="workshop-edit-field">
+        <span>Estado</span>
+        <select name="status" [(ngModel)]="clientForm.status" required>
+          <option value="active">Activo</option>
+          <option value="suspended">Desactivado</option>
+        </select>
+      </label>
+      <label class="workshop-edit-field workshop-edit-field-wide">
+        <span class="client-terms-row">
+          <input type="checkbox" name="accepted_terms" [(ngModel)]="clientForm.accepted_terms" />
+          <span>Terminos aceptados</span>
+        </span>
+      </label>
+
+      <p class="workshop-edit-feedback" *ngIf="clientEditFeedback">{{ clientEditFeedback }}</p>
+
+      <div class="workshop-edit-actions">
+        <button class="dashboard-refresh-button" type="submit" [disabled]="isSavingClient">
+          {{ isSavingClient ? 'Actualizando...' : 'Actualizar' }}
+        </button>
+        <button class="dashboard-secondary-button" type="button" (click)="cancelClientEdit()">Cancelar</button>
+      </div>
+    </form>
+  </section>
+</div>
+
+<div class="dashboard-modal-backdrop" *ngIf="showClientDeleteModal" (click)="cancelClientDelete()">
+  <section class="dashboard-modal-card" (click)="$event.stopPropagation()">
+    <div class="dashboard-modal-head">
+      <div>
+        <p class="dashboard-panel-kicker">Edición de cliente</p>
+        <h3>Eliminar cliente</h3>
+      </div>
+    </div>
+
+    <div class="client-delete-modal-copy">
+      <p>¿Deseas eliminar a <strong>{{ clientPendingDelete?.full_name }}</strong>?</p>
+      <p class="client-delete-modal-note">
+        El registro se quitará de la lista de clientes, también se eliminarán sus vehículos registrados y esta acción no se podrá deshacer.
+      </p>
+    </div>
+
+    <div class="workshop-edit-actions">
+      <button class="client-delete-confirm-button" type="button" (click)="confirmClientDelete()">Eliminar cliente</button>
+      <button class="dashboard-secondary-button" type="button" (click)="cancelClientDelete()">Cancelar</button>
+    </div>
+  </section>
+</div>

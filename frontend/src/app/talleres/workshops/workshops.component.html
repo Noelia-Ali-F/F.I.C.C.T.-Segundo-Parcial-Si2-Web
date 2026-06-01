@@ -1,0 +1,259 @@
+<article class="dashboard-panel dashboard-panel-wide workshops-page">
+  <div class="dashboard-panel-head">
+    <div>
+      <p class="dashboard-panel-kicker">Registros recibidos</p>
+      <h2>Registra tu taller mecánico</h2>
+    </div>
+    <div class="dashboard-toolbar">
+      <span class="dashboard-toolbar-note">{{ workshops.length }} registros cargados</span>
+      <button class="dashboard-refresh-button" type="button" (click)="loadWorkshops()">
+        Actualizar
+      </button>
+    </div>
+  </div>
+
+  <p class="dashboard-loading" *ngIf="isLoading">Cargando talleres registrados...</p>
+  <p class="dashboard-empty" *ngIf="!isLoading && !workshops.length">
+    Aún no hay talleres registrados.
+  </p>
+
+  <div class="dashboard-table-wrap" *ngIf="!isLoading && workshops.length">
+    <table class="dashboard-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Taller</th>
+          <th>Responsable</th>
+          <th>Contacto</th>
+          <th>Zona</th>
+          <th>Especialidad</th>
+          <th>Registro</th>
+          <th>Aprobación</th>
+          <th>Opciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let workshop of paginatedWorkshops">
+          <td data-label="ID">
+            <span class="dashboard-id-chip">#{{ workshop.id }}</span>
+          </td>
+          <td data-label="Taller">
+            <div class="dashboard-table-primary">
+              <strong>{{ workshop.workshop_name }}</strong>
+              <span>{{ getWorkshopStatus(workshop.created_at) }}</span>
+            </div>
+          </td>
+          <td data-label="Responsable">{{ workshop.contact_name }}</td>
+          <td data-label="Contacto">
+            <div class="dashboard-table-contact">
+              <strong>{{ workshop.phone }}</strong>
+              <span>{{ workshop.email }}</span>
+            </div>
+          </td>
+          <td data-label="Zona">{{ workshop.zone }}</td>
+          <td data-label="Especialidad">{{ workshop.specialty }}</td>
+          <td data-label="Registro">{{ workshop.created_at | date: 'short' }}</td>
+          <td data-label="Aprobación">
+            <button
+              class="dashboard-status-pill dashboard-status-button"
+              type="button"
+              [attr.data-status]="workshop.approval_status"
+              (click)="cycleWorkshopApproval(workshop)"
+              [attr.aria-label]="'Cambiar aprobación de ' + workshop.workshop_name"
+            >
+              <span class="dashboard-status-dot"></span>
+              {{ workshopApprovalLabel(workshop.approval_status) }}
+            </button>
+          </td>
+          <td data-label="Opciones">
+            <div class="workshop-actions">
+              <button
+                class="technician-icon-button"
+                type="button"
+                (click)="editWorkshop(workshop)"
+                [attr.aria-label]="'Editar ' + workshop.workshop_name"
+                title="Editar"
+              >
+                ✎
+              </button>
+              <button
+                class="technician-icon-button workshop-delete-button"
+                type="button"
+                (click)="deleteWorkshop(workshop)"
+                [attr.aria-label]="'Eliminar ' + workshop.workshop_name"
+                title="Eliminar"
+              >
+                🗑
+              </button>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="dashboard-pagination" *ngIf="!isLoading && workshops.length > workshopsPageSize">
+    <p class="dashboard-pagination-info">
+      Mostrando {{ workshopsRangeStart }}-{{ workshopsRangeEnd }} de {{ workshops.length }} registros
+    </p>
+
+    <div class="dashboard-pagination-actions">
+      <button
+        class="dashboard-secondary-button"
+        type="button"
+        (click)="goToPreviousWorkshopsPage()"
+        [disabled]="workshopsPage === 1"
+      >
+        Anterior
+      </button>
+      <span class="dashboard-pagination-page">Página {{ workshopsPage }} / {{ workshopsTotalPages }}</span>
+      <button
+        class="dashboard-secondary-button"
+        type="button"
+        (click)="goToNextWorkshopsPage()"
+        [disabled]="workshopsPage === workshopsTotalPages"
+      >
+        Siguiente
+      </button>
+    </div>
+  </div>
+</article>
+
+<div class="dashboard-modal-backdrop" *ngIf="showWorkshopEditModal" (click)="cancelWorkshopEdit()">
+  <section class="dashboard-modal-card" (click)="$event.stopPropagation()">
+    <div class="dashboard-modal-head">
+      <div>
+        <p class="dashboard-panel-kicker">Edición de registro</p>
+        <h3>Actualizar taller</h3>
+      </div>
+    </div>
+
+    <!--
+      AQUI ESTA EL FORMULARIO DE EDICION DE TALLERES
+    -->
+    <form class="workshop-edit-form" (ngSubmit)="submitWorkshopEdit()">
+      <label class="workshop-edit-field">
+        <span>Taller</span>
+        <input
+          type="text"
+          name="workshop_name"
+          [(ngModel)]="workshopForm.workshop_name"
+          required
+          minlength="3"
+        />
+      </label>
+
+      <label class="workshop-edit-field">
+        <span>Responsable</span>
+        <input
+          type="text"
+          name="contact_name"
+          [(ngModel)]="workshopForm.contact_name"
+          required
+          minlength="3"
+        />
+      </label>
+
+      <label class="workshop-edit-field">
+        <span>Contacto</span>
+        <input
+          type="text"
+          name="phone"
+          [(ngModel)]="workshopForm.phone"
+          required
+          minlength="7"
+        />
+      </label>
+
+      <label class="workshop-edit-field">
+        <span>Correo Electrónico</span>
+        <input
+          type="email"
+          name="email"
+          [(ngModel)]="workshopForm.email"
+          required
+        />
+      </label>
+
+      <label class="workshop-edit-field">
+        <span>Zona</span>
+        <select name="zone" [(ngModel)]="workshopForm.zone" required>
+          <option value="" disabled>Selecciona una zona</option>
+          <option *ngFor="let zone of workshopZoneOptions" [value]="zone">{{ zone }}</option>
+        </select>
+      </label>
+
+      <label class="workshop-edit-field workshop-edit-field-wide">
+        <span>Especialidad</span>
+        <select name="specialty" [(ngModel)]="workshopForm.specialty" required>
+          <option value="" disabled>Selecciona una especialidad</option>
+          <option *ngFor="let specialty of workshopSpecialtyOptions" [value]="specialty">
+            {{ specialty }}
+          </option>
+        </select>
+      </label>
+
+      <label class="workshop-edit-field workshop-edit-field-wide">
+        <span>Ubicación del Taller</span>
+        <div class="workshop-edit-map-field">
+          <button
+            class="workshop-edit-map-locate-button"
+            type="button"
+            (click)="locateWorkshopEditCurrentPosition()"
+            [disabled]="isWorkshopLocationLocating"
+            [attr.aria-label]="
+              isWorkshopLocationLocating ? 'Obteniendo ubicación actual' : 'Usar ubicación actual'
+            "
+            [title]="
+              isWorkshopLocationLocating
+                ? 'Ubicando...'
+                : isSecureContext
+                  ? 'Usar ubicación actual'
+                  : 'La ubicación automática requiere HTTPS o localhost'
+            "
+          >
+            ⌖
+          </button>
+          <div
+            #workshopEditMapCanvas
+            class="workshop-edit-map-canvas"
+            aria-label="Mapa interactivo de ubicación del taller"
+          ></div>
+        </div>
+        <div class="workshop-edit-map-meta">
+          <small>Haz clic en el mapa o arrastra el marcador para actualizar la ubicación.</small>
+          <strong>
+            Lat: {{ formatCoordinate(workshopForm.latitude) }} | Lng: {{ formatCoordinate(workshopForm.longitude) }}
+          </strong>
+          <span class="workshop-edit-map-status error" *ngIf="workshopLocationMessage">
+            {{ workshopLocationMessage }}
+          </span>
+        </div>
+      </label>
+
+      <label class="workshop-edit-field workshop-edit-field-wide">
+        <span>Nueva contraseña</span>
+        <input
+          type="password"
+          name="password"
+          [(ngModel)]="workshopForm.password"
+          minlength="6"
+          placeholder="Dejar vacio para mantener la actual"
+        />
+      </label>
+
+      <p class="workshop-edit-feedback" *ngIf="workshopEditFeedback">
+        {{ workshopEditFeedback }}
+      </p>
+
+      <div class="workshop-edit-actions">
+        <button class="dashboard-refresh-button" type="submit" [disabled]="isSavingWorkshop">
+          {{ isSavingWorkshop ? 'Actualizando...' : 'Actualizar' }}
+        </button>
+        <button class="dashboard-secondary-button" type="button" (click)="cancelWorkshopEdit()">
+          Cancelar
+        </button>
+      </div>
+    </form>
+  </section>
+</div>

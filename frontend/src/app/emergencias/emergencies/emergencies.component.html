@@ -1,0 +1,127 @@
+<article class="dashboard-panel dashboard-panel-wide">
+  <div class="technician-crud-head">
+    <div>
+      <p class="dashboard-panel-kicker">Solicitudes recibidas</p>
+      <h2>Emergencias</h2>
+    </div>
+    <button class="dashboard-refresh-button" type="button" (click)="loadEmergencies()">Actualizar</button>
+  </div>
+
+  <p class="dashboard-loading" *ngIf="isEmergenciesLoading">Cargando emergencias...</p>
+  <p class="dashboard-empty" *ngIf="!isEmergenciesLoading && !maintenanceRequests.length">No hay emergencias registradas.</p>
+
+  <div class="dashboard-table-wrap" *ngIf="!isEmergenciesLoading && maintenanceRequests.length">
+    <table class="dashboard-table dashboard-table-technicians">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Cliente</th>
+          <th>Vehículo</th>
+          <th>Problema</th>
+          <th>Estado</th>
+          <th>Monto</th>
+          <th>Opciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let request of maintenanceRequests">
+          <td data-label="Código"><span class="dashboard-id-chip">{{ request.code }}</span></td>
+          <td data-label="Cliente">
+            <div class="dashboard-table-primary">
+              <strong>{{ request.client }}</strong>
+              <span>{{ request.location }}</span>
+            </div>
+          </td>
+          <td data-label="Vehículo">{{ request.vehicle }}</td>
+          <td data-label="Problema">{{ request.problemType }}</td>
+          <td data-label="Estado">
+            <span class="dashboard-status-pill" [attr.data-status]="request.status">
+              <span class="dashboard-status-dot"></span>
+              {{ request.status | titlecase }}
+            </span>
+          </td>
+          <td data-label="Monto">{{ formatPrice(request.price) }}</td>
+          <td data-label="Opciones">
+            <div class="technician-actions">
+              <button class="technician-inline-button" type="button" (click)="openEmergencyModal(request)">Ver detalle</button>
+              <button class="technician-icon-button workshop-delete-button" type="button" (click)="deleteEmergency(request)" aria-label="Eliminar emergencia">🗑</button>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<div class="dashboard-modal-backdrop" *ngIf="showEmergencyModal && selectedMaintenanceRequest" (click)="closeEmergencyModal()">
+  <section class="dashboard-modal-card emergency-modal-card" (click)="$event.stopPropagation()">
+    <div class="dashboard-modal-head">
+      <div>
+        <p class="dashboard-panel-kicker">Emergencia seleccionada</p>
+        <h3>{{ selectedMaintenanceRequest.code }}</h3>
+      </div>
+    </div>
+
+    <div class="emergency-detail-grid">
+      <p><strong>Cliente:</strong> {{ selectedMaintenanceRequest.client }}</p>
+      <p><strong>Vehículo:</strong> {{ selectedMaintenanceRequest.vehicle }}</p>
+      <p><strong>Ubicación:</strong> {{ selectedMaintenanceRequest.location }}</p>
+      <p><strong>Tipo:</strong> {{ selectedMaintenanceRequest.problemType }}</p>
+      <p><strong>Estado:</strong> {{ selectedMaintenanceRequest.status | titlecase }}</p>
+      <p><strong>Monto:</strong> {{ formatPrice(selectedMaintenanceRequest.price) }}</p>
+      <p *ngIf="selectedMaintenanceRequest.nearestWorkshopName"><strong>Taller cercano:</strong> {{ selectedMaintenanceRequest.nearestWorkshopName }}</p>
+      <p><strong>Reportado:</strong> {{ selectedMaintenanceRequest.reportedAt }}</p>
+    </div>
+
+    <div class="emergency-detail-block" *ngIf="selectedMaintenanceRequest.detail">
+      <strong>Detalle</strong>
+      <p>{{ selectedMaintenanceRequest.detail }}</p>
+    </div>
+
+    <div class="emergency-detail-block" *ngIf="selectedMaintenanceRequest.clientDescription">
+      <strong>Descripción del cliente</strong>
+      <p>{{ selectedMaintenanceRequest.clientDescription }}</p>
+    </div>
+
+    <div class="emergency-detail-block" *ngIf="selectedMaintenanceRequest.audioTranscript">
+      <strong>Transcripción</strong>
+      <p>{{ selectedMaintenanceRequest.audioTranscript }}</p>
+    </div>
+
+    <div class="emergency-detail-block" *ngIf="selectedMaintenanceRequest.photoUrls.length">
+      <strong>Fotos</strong>
+      <div class="emergency-photo-grid">
+        <img *ngFor="let photoUrl of selectedMaintenanceRequest.photoUrls" [src]="photoUrl" alt="Foto de emergencia" class="emergency-photo-thumb" />
+      </div>
+    </div>
+
+    <div class="emergency-detail-block" *ngIf="selectedMaintenanceRequest.audioUrl">
+      <strong>Audio</strong>
+      <audio controls [src]="selectedMaintenanceRequest.audioUrl" class="emergency-audio-player"></audio>
+    </div>
+
+    <div class="emergency-detail-block" *ngIf="currentWorkshopId">
+      <strong>Asignar técnico</strong>
+      <div class="emergency-assignment-row">
+        <select [(ngModel)]="selectedEmergencyTechnicianId" name="selected_technician_id">
+          <option [ngValue]="null">Selecciona un técnico</option>
+          <option *ngFor="let technician of technicians" [ngValue]="technician.id">
+            {{ technician.full_name }} · {{ technician.specialty }}
+          </option>
+        </select>
+        <button class="dashboard-refresh-button" type="button" (click)="assignSelectedEmergencyTechnician()" [disabled]="isAssigningEmergencyTechnician">
+          {{ isAssigningEmergencyTechnician ? 'Asignando...' : 'Asignar' }}
+        </button>
+      </div>
+      <p class="workshop-edit-feedback" *ngIf="emergencyAssignmentFeedback">{{ emergencyAssignmentFeedback }}</p>
+    </div>
+
+    <p class="workshop-edit-feedback" *ngIf="emergencyFeedback">{{ emergencyFeedback }}</p>
+
+    <div class="workshop-edit-actions">
+      <button class="dashboard-refresh-button" type="button" (click)="updateSelectedEmergencyStatus('activo')" [disabled]="isUpdatingEmergencyStatus">Aceptar</button>
+      <button class="dashboard-secondary-button" type="button" (click)="updateSelectedEmergencyStatus('rechazado')" [disabled]="isUpdatingEmergencyStatus">Rechazar</button>
+      <button class="dashboard-secondary-button" type="button" (click)="closeEmergencyModal()">Cerrar</button>
+    </div>
+  </section>
+</div>

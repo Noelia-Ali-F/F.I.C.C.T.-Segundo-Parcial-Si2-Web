@@ -1,0 +1,26 @@
+<article class="dashboard-panel dashboard-panel-wide">
+  <div class="technician-crud-head">
+    <div>
+      <p class="dashboard-panel-kicker">Seguimiento interno</p>
+      <h2>Bitácora</h2>
+    </div>
+    <button class="dashboard-refresh-button" type="button" (click)="loadAuditItems()">Actualizar</button>
+  </div>
+
+  <p class="dashboard-loading" *ngIf="isLoading">Cargando bitácora...</p>
+  <p class="dashboard-empty" *ngIf="!isLoading && !auditItems.length">Todavía no hay movimientos registrados para mostrar.</p>
+
+  <div class="audit-timeline" *ngIf="!isLoading && auditItems.length">
+    <article class="audit-item" *ngFor="let item of auditItems" [attr.data-tone]="item.tone">
+      <span class="audit-dot"></span>
+      <div class="audit-card">
+        <div class="audit-card-head">
+          <strong>{{ item.title }}</strong>
+          <span>{{ item.createdAt | date: 'short' }}</span>
+        </div>
+        <p>{{ item.detail }}</p>
+        <small>{{ item.meta }}</small>
+      </div>
+    </article>
+  </div>
+</article>

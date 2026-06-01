@@ -1,0 +1,118 @@
+<article class="dashboard-panel dashboard-panel-wide">
+  <div class="technician-crud">
+    <div class="technician-crud-head">
+      <div>
+        <p class="dashboard-panel-kicker">Gestion del equipo</p>
+        <h2>Gestionar Tecnicos</h2>
+      </div>
+      <button class="technician-create-button" type="button" (click)="startCreate()">
+        <span>+</span>
+        <span>{{ showTechnicianForm ? (editingTechnicianId ? 'Editar Tecnico' : 'Crear Tecnico') : 'Crear Tecnico' }}</span>
+      </button>
+    </div>
+
+    <div class="technician-filter-tabs">
+      <button type="button" class="technician-filter-tab" [class.is-active]="technicianFilter === 'activos'" (click)="technicianFilter = 'activos'">Activos</button>
+      <button type="button" class="technician-filter-tab" [class.is-active]="technicianFilter === 'todos'" (click)="technicianFilter = 'todos'">Todos</button>
+      <button type="button" class="technician-filter-tab" [class.is-active]="technicianFilter === 'historial'" (click)="technicianFilter = 'historial'">Historial</button>
+    </div>
+
+    <section class="technician-form-card" *ngIf="showTechnicianForm">
+      <div class="technician-form-head">
+        <div>
+          <p class="dashboard-panel-kicker">Formulario</p>
+          <h3>{{ editingTechnicianId ? 'Editar tecnico' : 'Agregar tecnico' }}</h3>
+        </div>
+        <button class="dashboard-secondary-button" type="button" (click)="cancelTechnicianForm()">Cerrar</button>
+      </div>
+
+      <!--
+        AQUI ESTA EL FORMULARIO DE REGISTRO Y EDICION DE TECNICOS
+      -->
+      <form class="technician-form technician-form-grid" (ngSubmit)="submitTechnician()">
+        <label class="technician-field">
+          <span>Nombre</span>
+          <input type="text" name="full_name" [(ngModel)]="technicianForm.full_name" required minlength="3" placeholder="Ej. Carlos Ramirez" />
+        </label>
+        <label class="technician-field">
+          <span>Telefono</span>
+          <input type="text" name="phone" [(ngModel)]="technicianForm.phone" required minlength="7" placeholder="Ej. 76324511" />
+        </label>
+        <label class="technician-field">
+          <span>Email</span>
+          <input type="email" name="email" [(ngModel)]="technicianForm.email" required placeholder="Ej. tecnico@correo.com" />
+        </label>
+        <label class="technician-field">
+          <span>Especialidad</span>
+          <select name="specialty" [(ngModel)]="technicianForm.specialty" required>
+            <option value="" disabled>Selecciona una especialidad</option>
+            <option *ngFor="let specialty of technicianSpecialtyOptions" [value]="specialty">{{ specialty }}</option>
+          </select>
+        </label>
+        <label class="technician-field technician-field-wide">
+          <span>Estado del tecnico</span>
+          <select name="status" [(ngModel)]="technicianForm.status" required>
+            <option value="disponible">Disponible</option>
+            <option value="ocupado">Ocupado</option>
+            <option value="fuera_de_servicio">Fuera de servicio</option>
+          </select>
+        </label>
+
+        <p class="technician-form-feedback technician-field-wide" *ngIf="technicianFeedback">{{ technicianFeedback }}</p>
+
+        <div class="technician-form-actions technician-field-wide">
+          <button class="dashboard-refresh-button" type="submit" [disabled]="isSavingTechnician">
+            {{ isSavingTechnician ? 'Guardando...' : editingTechnicianId ? 'Guardar cambios' : 'Agregar Tecnico' }}
+          </button>
+          <button class="dashboard-secondary-button" type="button" (click)="resetTechnicianForm()">Limpiar</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="technician-table-card">
+      <p class="dashboard-loading" *ngIf="isTechniciansLoading">Cargando tecnicos...</p>
+      <p class="dashboard-empty" *ngIf="!isTechniciansLoading && !filteredTechnicians.length">No hay tecnicos para el filtro seleccionado.</p>
+
+      <div class="dashboard-table-wrap technician-table-wrap" *ngIf="!isTechniciansLoading && filteredTechnicians.length">
+        <table class="dashboard-table dashboard-table-technicians">
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Telefono</th>
+              <th>Email</th>
+              <th>Especialidad</th>
+              <th>Estado</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let technician of filteredTechnicians">
+              <td data-label="Nombre">
+                <div class="dashboard-table-primary">
+                  <strong>{{ technician.full_name }}</strong>
+                  <span>Actualizado {{ technician.updated_at | date: 'shortDate' }}</span>
+                </div>
+              </td>
+              <td data-label="Telefono">{{ technician.phone }}</td>
+              <td data-label="Email">{{ technician.email }}</td>
+              <td data-label="Especialidad">{{ technician.specialty }}</td>
+              <td data-label="Estado">
+                <span class="dashboard-status-pill" [attr.data-status]="technician.status">
+                  <span class="dashboard-status-dot"></span>
+                  {{ statusLabel(technician.status) }}
+                </span>
+              </td>
+              <td data-label="Acciones">
+                <div class="technician-actions">
+                  <button class="technician-inline-button" type="button" (click)="editTechnician(technician)">Editar</button>
+                  <button class="technician-icon-button" type="button" (click)="deleteTechnician(technician)" aria-label="Eliminar tecnico">🗑</button>
+                  <button class="technician-icon-button" type="button" (click)="toggleTechnicianStatus(technician)" aria-label="Cambiar estado">☰</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</article>

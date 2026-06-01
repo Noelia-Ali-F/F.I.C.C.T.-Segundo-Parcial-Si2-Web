@@ -1,0 +1,60 @@
+<article class="dashboard-panel dashboard-panel-wide">
+  <div class="technician-crud-head">
+    <div>
+      <p class="dashboard-panel-kicker">Resumen financiero</p>
+      <h2>Reportes</h2>
+    </div>
+    <button class="dashboard-refresh-button" type="button" (click)="loadReports()">Actualizar</button>
+  </div>
+
+  <div class="reports-summary-grid">
+    <article class="report-summary-card">
+      <small>Trabajos procesados</small>
+      <strong>{{ completedRequests.length }}</strong>
+    </article>
+    <article class="report-summary-card">
+      <small>Ingresos brutos</small>
+      <strong>{{ formatPrice(totalGross) }}</strong>
+    </article>
+    <article class="report-summary-card">
+      <small>Servicio ACB</small>
+      <strong>{{ formatPrice(totalService) }}</strong>
+    </article>
+    <article class="report-summary-card">
+      <small>Ingreso neto</small>
+      <strong>{{ formatPrice(totalNet) }}</strong>
+    </article>
+  </div>
+
+  <p class="dashboard-loading" *ngIf="isLoading">Cargando reportes...</p>
+  <p class="dashboard-empty" *ngIf="!isLoading && !reportWorkRequests.length">No hay trabajos para reportar.</p>
+
+  <div class="dashboard-table-wrap" *ngIf="!isLoading && reportWorkRequests.length">
+    <table class="dashboard-table dashboard-table-technicians">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Cliente</th>
+          <th>Problema</th>
+          <th>Estado</th>
+          <th>Bruto</th>
+          <th>Servicio</th>
+          <th>Neto</th>
+          <th>Fecha</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let request of reportWorkRequests">
+          <td data-label="Código">{{ request.code }}</td>
+          <td data-label="Cliente">{{ request.client }}</td>
+          <td data-label="Problema">{{ request.problemType }}</td>
+          <td data-label="Estado">{{ request.status | titlecase }}</td>
+          <td data-label="Bruto">{{ formatPrice(request.price) }}</td>
+          <td data-label="Servicio">{{ serviceAmount(request.price) }}</td>
+          <td data-label="Neto">{{ netAmount(request.price) }}</td>
+          <td data-label="Fecha">{{ request.createdAt | date: 'short' }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</article>

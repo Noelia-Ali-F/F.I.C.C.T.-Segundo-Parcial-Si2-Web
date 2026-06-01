@@ -1,0 +1,108 @@
+<div class="app-shell">
+  <div class="page-orb orb-one"></div>
+  <div class="page-orb orb-two"></div>
+  <div class="page-orb orb-three"></div>
+
+  <ng-container *ngIf="!(isAuthRoute$ | async)">
+    <div class="utility-bar">
+      <p>Centro de atención telefónica: 2791727</p>
+      <p>Auxilio mecánico: 800163316</p>
+      <a routerLink="/contacto">Contacto</a>
+    </div>
+
+    <header class="topbar">
+      <a class="login-button" routerLink="/login">Iniciar sesión</a>
+
+      <div class="brand-block">
+        <a class="brand" routerLink="/">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 88 88" role="img">
+              <rect x="6" y="6" width="76" height="76" rx="24" fill="url(#brandGradient)" />
+              <path
+                d="M23 56H18a4 4 0 0 1 0-8h8l8-13a8 8 0 0 1 6.8-3.9H55a8 8 0 0 1 6.3 3.1l7 8.5h3.7a5 5 0 0 1 5 5v6a4.4 4.4 0 0 1-4.4 4.3h-2.1"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="4.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M40 28l12-8m-3 0h10v10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="4.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M33 56h18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="4.2"
+                stroke-linecap="round"
+              />
+              <circle cx="28" cy="58" r="7.4" fill="currentColor" />
+              <circle cx="60" cy="58" r="7.4" fill="currentColor" />
+              <circle cx="28" cy="58" r="2.8" fill="#10386E" />
+              <circle cx="60" cy="58" r="2.8" fill="#10386E" />
+              <path
+                d="M61 22c-2.5 0-4.6 2-4.6 4.5 0 .7.2 1.5.5 2.1L47 39.4l4.6 4.5 9.7-10.8c.7.3 1.4.5 2.2.5 2.5 0 4.5-2 4.5-4.5 0-2.5-2-4.5-4.5-4.5Zm-23.5 21 6.9 6.9-2.9 2.9a4.4 4.4 0 0 1-6.2 0l-1-1a4.4 4.4 0 0 1 0-6.2l3.2-2.6Z"
+                fill="#10386E"
+              />
+              <defs>
+                <linearGradient id="brandGradient" x1="16" y1="12" x2="70" y2="78" gradientUnits="userSpaceOnUse">
+                  <stop stop-color="#F4CF46" />
+                  <stop offset="1" stop-color="#D8AD20" />
+                </linearGradient>
+              </defs>
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <strong>Taller ACB Asistencia</strong>
+            <small>Asistencia inmediata, taller mecánico y servicio de remolque</small>
+          </span>
+        </a>
+      </div>
+
+      <div class="nav-row">
+        <nav class="main-nav" aria-label="Principal">
+          <a
+            *ngFor="let item of navigation"
+            [routerLink]="item.path"
+            routerLinkActive="is-active"
+            [routerLinkActiveOptions]="{ exact: item.path === '/' }"
+          >
+            {{ item.label }}
+          </a>
+        </nav>
+      </div>
+    </header>
+  </ng-container>
+
+  <router-outlet />
+
+  <footer class="site-footer" *ngIf="!(isAuthRoute$ | async)">
+    <section class="footer-brand">
+      <span class="footer-pill">Asistencia 24/7</span>
+      <p class="footer-title">Taller ACB Asistencia</p>
+      <p>Conectamos conductores con talleres aliados para asistencia inmediata, soporte mecánico y remolque en momentos críticos.</p>
+    </section>
+
+    <section>
+      <p class="footer-title">Enlaces rápidos</p>
+      <a routerLink="/">Inicio</a>
+      <a routerLink="/servicios">Servicios</a>
+      <a routerLink="/planes">Planes</a>
+      <a routerLink="/mapa">Mapa</a>
+      <a routerLink="/contacto">Contacto</a>
+    </section>
+
+    <section>
+      <p class="footer-title">Contacto</p>
+      <p>marketing@acbasistencia.com</p>
+      <p>Centro de atención: 2791727</p>
+      <p>Línea gratuita: 800163316</p>
+      <p>La Paz, Bolivia</p>
+    </section>
+  </footer>
+</div>

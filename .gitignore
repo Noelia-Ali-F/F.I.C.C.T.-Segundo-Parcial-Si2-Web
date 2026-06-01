@@ -5,6 +5,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
+pip-log.txt
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
@@ -46,6 +47,7 @@ web_modules/
 
 # TypeScript cache
 *.tsbuildinfo
+.angular/
 
 # Optional npm cache directory
 .npm
@@ -69,6 +71,32 @@ web_modules/
 .env
 .env.*
 !.env.example
+backend/firebase-service-account.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.venv/
+.venv.test/
+.venv.broken/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+site/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
@@ -81,7 +109,6 @@ out
 # Nuxt.js build / generate output
 .nuxt
 dist
-.output
 
 # Gatsby files
 .cache/
@@ -92,8 +119,9 @@ dist
 # vuepress build output
 .vuepress/dist
 
-# vuepress v2.x temp directory
+# vuepress v2.x temp and cache directory
 .temp
+.cache
 
 # Sveltekit cache directory
 .svelte-kit/
@@ -125,9 +153,6 @@ dist
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
-# pnpm
-.pnpm-store
-
 # yarn v3
 .pnp.*
 .yarn/*
@@ -137,7 +162,45 @@ dist
 !.yarn/sdks
 !.yarn/versions
 
-# Vite files
+# Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
-.vite/
+
+# IDEs and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Docker
+postgres_data/
+
+# Project-specific local env files
+/backend/.env
+/frontend/.env
+/backend/uploads/
+/uploads/
+
+# Angular build and local cache
+/frontend/dist/
+/frontend/node_modules/
+/frontend/.angular/
+/frontend/.sass-cache/
+
+# Python local artifacts
+/backend/__pycache__/
+/backend/app/__pycache__/
+/backend/.pytest_cache/
+/backend/.venv/
+/backend/.venv.test/
+/backend/.venv.broken/
+
+# Local database or backup files
+*.sqlite3
+*.db
+*.bak
+
+# Optional local Docker overrides
+docker-compose.override.yml
