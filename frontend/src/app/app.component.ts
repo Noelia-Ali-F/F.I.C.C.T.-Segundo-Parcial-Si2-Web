@@ -17,7 +17,6 @@ export class AppComponent {
     { label: 'Inicio', path: '/' },
     { label: 'Servicios', path: '/servicios' },
     { label: 'Planes', path: '/planes' },
-    { label: 'Mapa', path: '/mapa' },
     { label: 'Contacto', path: '/contacto' },
   ];
 

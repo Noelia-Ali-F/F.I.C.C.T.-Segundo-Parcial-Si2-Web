@@ -7,11 +7,11 @@ import { DashboardPageComponent } from './dashboard/dashboard-page.component';
 import { OfflineEmergenciesListComponent } from './emergencias/offline-emergencies-list.component';
 import { OfflineEmergencyFormComponent } from './emergencias/offline-emergency-form.component';
 import { HomePageComponent } from './inicio/home.component';
-import { MapPageComponent } from './inicio/mapa.component';
 import { NotFoundPageComponent } from './inicio/not-found.component';
 import { PlanesPageComponent } from './inicio/planes.component';
 import { SectionPageComponent } from './inicio/section.component';
 import { ServiciosPageComponent } from './inicio/servicios.component';
+import { RegistroTallerComponent } from './registro-taller/registro-taller.component';
 
 export const appRoutes: Routes = [
   {
@@ -32,7 +32,7 @@ export const appRoutes: Routes = [
   {
     path: 'planes',
     component: PlanesPageComponent,
-    title: 'Planes | Talleres Socios',
+    title: 'Planes | Empresas y Talleres',
   },
   {
     path: 'novedades',
@@ -46,8 +46,8 @@ export const appRoutes: Routes = [
   },
   {
     path: 'mapa',
-    component: MapPageComponent,
-    title: 'Mapa | Santa Cruz de la Sierra',
+    redirectTo: 'registro-taller',
+    pathMatch: 'full',
   },
   {
     path: 'login',
@@ -58,6 +58,11 @@ export const appRoutes: Routes = [
     path: 'forgot-password',
     component: ForgotPasswordPageComponent,
     title: 'Recuperar contraseña | Taller ACB Asistencia',
+  },
+  {
+    path: 'registro-taller',
+    component: RegistroTallerComponent,
+    title: 'Registrar mi Empresa | ACB SaaS',
   },
   {
     path: 'dashboard',

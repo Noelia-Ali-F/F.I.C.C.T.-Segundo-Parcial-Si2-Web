@@ -1,6 +1,7 @@
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
+import { SessionRequestContext } from '../../auth/session-context';
 import { API_BASE_URL, BACKEND_BASE_URL } from '../../shared/api-base';
 import { EmergencyReport, EmergencyStatus, MaintenanceRequest } from './emergencies.model';
 
@@ -11,45 +12,57 @@ export class EmergenciesService {
   private readonly http = inject(HttpClient);
   private readonly emergenciesApiUrl = `${API_BASE_URL}/emergencies`;
 
-  listEmergencyReports(workshopId: number | null): Observable<EmergencyReport[]> {
+  listEmergencyReports(context: SessionRequestContext): Observable<EmergencyReport[]> {
     let params = new HttpParams();
-    if (workshopId) {
-      params = params.set('nearest_workshop_id', String(workshopId));
+    if (context.workshopId) {
+      params = params.set('nearest_workshop_id', String(context.workshopId));
     }
-    return this.http.get<EmergencyReport[]>(this.emergenciesApiUrl, { params });
+    return this.http.get<EmergencyReport[]>(this.emergenciesApiUrl, {
+      params,
+      headers: context.headers,
+    });
   }
 
   updateEmergencyStatus(
     emergencyId: number,
     status: Exclude<EmergencyStatus, 'pendiente'>,
-    workshopId: number | null,
+    context: SessionRequestContext,
   ): Observable<EmergencyReport> {
-    const params = workshopId ? new HttpParams().set('workshop_id', String(workshopId)) : undefined;
+    const params = context.workshopId ? new HttpParams().set('workshop_id', String(context.workshopId)) : undefined;
     return this.http.put<EmergencyReport>(
       `${this.emergenciesApiUrl}/${emergencyId}/status`,
       { emergency_status: status },
-      { params },
+      {
+        params,
+        headers: context.headers,
+      },
     );
   }
 
   assignTechnician(
     emergencyId: number,
-    workshopId: number,
+    context: SessionRequestContext,
     technicianId: number,
   ): Observable<EmergencyReport> {
     return this.http.put<EmergencyReport>(
       `${this.emergenciesApiUrl}/${emergencyId}/assign-technician`,
       { technician_id: technicianId },
-      { params: new HttpParams().set('workshop_id', String(workshopId)) },
+      {
+        params: new HttpParams().set('workshop_id', String(context.workshopId)),
+        headers: context.headers,
+      },
     );
   }
 
   deleteEmergency(
     emergencyId: number,
-    workshopId: number | null,
+    context: SessionRequestContext,
   ): Observable<void> {
-    const params = workshopId ? new HttpParams().set('workshop_id', String(workshopId)) : undefined;
-    return this.http.delete<void>(`${this.emergenciesApiUrl}/${emergencyId}`, { params });
+    const params = context.workshopId ? new HttpParams().set('workshop_id', String(context.workshopId)) : undefined;
+    return this.http.delete<void>(`${this.emergenciesApiUrl}/${emergencyId}`, {
+      params,
+      headers: context.headers,
+    });
   }
 
   mapEmergencyReportToRequest(report: EmergencyReport): MaintenanceRequest {

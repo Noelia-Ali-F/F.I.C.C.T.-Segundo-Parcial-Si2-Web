@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import json
@@ -16,10 +16,12 @@ import unicodedata
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import HTTPException, UploadFile, status
+import jwt as pyjwt
+from fastapi import Depends, HTTPException, UploadFile, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
-from app.db import get_client_by_id, list_active_device_fcm_tokens
+from app.db import create_notification, get_client_by_id, list_active_device_fcm_tokens, list_active_device_fcm_tokens_default
 
 try:
     from openai import OpenAI
@@ -47,6 +49,16 @@ PROTECTED_ADMIN_ID = 0
 WORKSHOP_ROLE = "workshop"
 LOGIN_MAX_ATTEMPTS = 3
 LOGIN_LOCKOUT_MINUTES = 10
+
+# Nuevos roles para la arquitectura Database-Per-Tenant
+ROLE_SUPERADMIN_GLOBAL = "SUPERADMIN_GLOBAL"    # = admin global del sistema
+ROLE_SUPERADMIN_TENANT = "SUPERADMIN_TENANT"    # dueño de una empresa/tenant
+ROLE_ADMIN_SUCURSAL = "ADMIN_SUCURSAL"          # administra una sucursal
+ROLE_TECNICO = "TECNICO"                        # técnico asignado a una sucursal
+ROLE_CLIENTE = "CLIENTE"                        # cliente móvil de un tenant
+
+# Conjunto de roles que pertenecen a un tenant específico
+TENANT_ROLES = {ROLE_SUPERADMIN_TENANT, ROLE_ADMIN_SUCURSAL, ROLE_TECNICO, ROLE_CLIENTE}
 
 UPLOADS_ROOT = Path(settings.uploads_dir)
 VEHICLE_UPLOADS_DIR = UPLOADS_ROOT / "vehicles"
@@ -83,6 +95,7 @@ EMERGENCY_STATUS_NOTIFICATION_LABELS = {
     "en_revision": "En revisión",
     "auxilio_asignado": "Auxilio asignado",
     "auxilio_en_camino": "Auxilio en camino",
+    "tecnico_en_sitio": "Técnico en sitio",
     "servicio_en_proceso": "Servicio en proceso",
     "servicio_finalizado": "Servicio finalizado",
     "solicitud_cancelada": "Solicitud cancelada",
@@ -193,6 +206,23 @@ def is_protected_admin_email(email: str) -> bool:
 
 def is_protected_admin_role(role: str) -> bool:
     return role.lower().strip() == PROTECTED_ADMIN_ROLE
+
+
+def normalize_role(role: str | None) -> str:
+    normalized = (role or "").strip()
+    if not normalized:
+        return ""
+    if normalized == PROTECTED_ADMIN_ROLE:
+        return ROLE_SUPERADMIN_GLOBAL
+    return normalized
+
+
+def is_superadmin_global(role: str | None) -> bool:
+    return normalize_role(role) == ROLE_SUPERADMIN_GLOBAL
+
+
+def is_legacy_workshop(role: str | None) -> bool:
+    return (role or "").strip() == WORKSHOP_ROLE
 
 
 def workshop_login_status(approval_status: object) -> str:
@@ -563,28 +593,154 @@ def ensure_firebase_app() -> bool:
         return False
 
 
+def firebase_push_is_ready() -> tuple[bool, str | None]:
+    if not settings.fcm_enabled:
+        return False, "FCM no está habilitado en este entorno"
+    if firebase_admin is None or credentials is None or messaging is None:
+        return False, "Firebase Admin SDK no está disponible"
+    credentials_path = normalize_optional_text(settings.firebase_credentials_path)
+    if not credentials_path:
+        return False, "FIREBASE_CREDENTIALS_PATH no está configurado"
+    if not ensure_firebase_app():
+        return False, "No se pudo inicializar Firebase Admin SDK"
+    return True, None
+
+
+def is_sensitive_push_event(data: Mapping[str, str]) -> bool:
+    push_type = str(data.get("type", "")).strip().lower()
+    sensitive_prefixes = ("emergency_", "quotation_", "technician_", "payment_")
+    if any(push_type.startswith(prefix) for prefix in sensitive_prefixes):
+        return True
+    sensitive_keys = {
+        "emergency_id",
+        "quotation_request_id",
+        "quotation_id",
+        "user_id",
+        "tenant_id",
+        "tenant_slug",
+        "status",
+        "status_label",
+        "payment_id",
+        "technician_id",
+    }
+    return any(key in data and str(data.get(key, "")).strip() != "" for key in sensitive_keys)
+
+
+def build_push_delivery(
+    *,
+    title: str,
+    body: str,
+    data: Mapping[str, str],
+    prefer_visible_notification: bool = False,
+) -> dict[str, object]:
+    normalized_data = {str(key): str(value) for key, value in data.items()}
+    sensitive = is_sensitive_push_event(normalized_data)
+    notification_title: str | None = title
+    notification_body: str | None = body
+    mode = "full_notification"
+
+    if sensitive:
+        if prefer_visible_notification:
+            notification_title = "Tienes una actualización"
+            notification_body = "Abre la app para revisar"
+            mode = "generic_notification"
+        else:
+            notification_title = None
+            notification_body = None
+            mode = "data_only"
+
+    return {
+        "data": normalized_data,
+        "notification_title": notification_title,
+        "notification_body": notification_body,
+        "mode": mode,
+        "sensitive": sensitive,
+    }
+
+
+def send_push_to_device_token(
+    *,
+    token: str,
+    title: str,
+    body: str,
+    data: Mapping[str, str],
+    prefer_visible_notification: bool = False,
+) -> tuple[str, dict[str, object]]:
+    ready, error_detail = firebase_push_is_ready()
+    if not ready or messaging is None:
+        raise RuntimeError(error_detail or "Firebase Admin SDK no está disponible")
+    delivery = build_push_delivery(
+        title=title,
+        body=body,
+        data=data,
+        prefer_visible_notification=prefer_visible_notification,
+    )
+    notification = None
+    if delivery["notification_title"] is not None and delivery["notification_body"] is not None:
+        notification = messaging.Notification(
+            title=str(delivery["notification_title"]),
+            body=str(delivery["notification_body"]),
+        )
+    message_id = str(
+        messaging.send(
+            messaging.Message(
+                notification=notification,
+                data=dict(delivery["data"]),
+                token=token,
+            )
+        )
+    )
+    return message_id, delivery
+
+
 def send_push_to_client(client_id: int | None, title: str, body: str, data: dict[str, str]) -> None:
     if client_id is None:
         return
     try:
-        devices = list_active_device_fcm_tokens(client_id)
+        create_notification(
+            {
+                "user_id": client_id,
+                "title": title,
+                "message": body,
+                "payload_json": json.dumps(data, ensure_ascii=False),
+            }
+        )
+    except Exception:
+        logger.exception("No se pudo persistir notificación para el usuario %s", client_id)
+    try:
+        from app.tenant_context import get_tenant
+
+        tenant = get_tenant()
+        if tenant is not None:
+            devices = list_active_device_fcm_tokens(
+                user_id=client_id,
+                role=ROLE_CLIENTE,
+                tenant_id=int(tenant["id"]) if tenant.get("id") is not None else None,
+                tenant_slug=str(tenant["slug"]) if tenant.get("slug") is not None else None,
+                sucursal_id=None,
+            )
+        else:
+            devices = list_active_device_fcm_tokens(
+                user_id=client_id,
+                role="client",
+                tenant_id=None,
+                tenant_slug=None,
+                sucursal_id=None,
+            )
+            if not devices:
+                devices = list_active_device_fcm_tokens_default(client_id)
     except Exception:
         logger.exception("No se pudieron consultar tokens FCM del cliente %s", client_id)
         return
-    if not devices or not ensure_firebase_app() or messaging is None:
+    ready, _ = firebase_push_is_ready()
+    if not devices or not ready:
         return
     for device in devices:
         token = str(device.get("fcm_token", "")).strip()
         if not token:
             continue
         try:
-            messaging.send(
-                messaging.Message(
-                    notification=messaging.Notification(title=title, body=body),
-                    data=data,
-                    token=token,
-                )
-            )
+            send_push_to_device_token(token=token, title=title, body=body, data=data)
         except Exception:
             logger.exception("No se pudo enviar push FCM al cliente %s", client_id)
 
@@ -687,6 +843,166 @@ def send_emergency_reassigned_notification(
     )
 
 
+def send_quotation_request_sent(
+    workshop_id: int,
+    quotation_id: int,
+    emergency_id: int | None,
+    status: str,
+) -> None:
+    """Notifica al taller que recibió una nueva solicitud de cotización."""
+    logger.warning(
+        "Enviando quotation_request_sent: quotation=%s workshop=%s emergency=%s",
+        quotation_id, workshop_id, emergency_id,
+    )
+    send_push_to_client(
+        workshop_id,
+        "Nueva solicitud de cotización",
+        "Se te ha invitado a cotizar una emergencia vehicular.",
+        {
+            "type": "quotation_request_sent",
+            "quotation_id": str(quotation_id),
+            "emergency_id": str(emergency_id) if emergency_id is not None else "",
+            "status": status,
+            "workshop_name": "",
+            "price": "",
+        },
+    )
+
+
+def send_quotation_offer_received(
+    client_id: int | None,
+    quotation_id: int,
+    emergency_id: int | None,
+    workshop_name: str,
+    price: float | None,
+) -> None:
+    """Notifica al cliente que un taller envió una propuesta de cotización."""
+    if client_id is None:
+        logger.warning("quotation_offer_received: sin client_id para quotation %s", quotation_id)
+        return
+    wname = compact_push_text(workshop_name, fallback="Un taller", max_length=80)
+    price_str = f"Bs. {price:.2f}" if price is not None else "—"
+    logger.warning(
+        "Enviando quotation_offer_received: quotation=%s client=%s taller=%s",
+        quotation_id, client_id, wname,
+    )
+    send_push_to_client(
+        client_id,
+        "Nueva propuesta recibida",
+        f"{wname} envió una cotización: {price_str}",
+        {
+            "type": "quotation_offer_received",
+            "quotation_id": str(quotation_id),
+            "emergency_id": str(emergency_id) if emergency_id is not None else "",
+            "status": "con_propuestas",
+            "workshop_name": wname,
+            "price": str(price) if price is not None else "",
+        },
+    )
+
+
+def send_quotation_offer_selected(
+    workshop_id: int,
+    quotation_id: int,
+    emergency_id: int | None,
+    price: float | None,
+) -> None:
+    """Notifica al taller que su propuesta fue seleccionada."""
+    logger.warning(
+        "Enviando quotation_offer_selected: quotation=%s workshop=%s",
+        quotation_id, workshop_id,
+    )
+    price_str = f"Bs. {price:.2f}" if price is not None else "—"
+    send_push_to_client(
+        workshop_id,
+        "¡Propuesta seleccionada!",
+        f"Tu cotización de {price_str} fue seleccionada por el cliente.",
+        {
+            "type": "quotation_offer_selected",
+            "quotation_id": str(quotation_id),
+            "emergency_id": str(emergency_id) if emergency_id is not None else "",
+            "status": "seleccionado",
+            "workshop_name": "",
+            "price": str(price) if price is not None else "",
+        },
+    )
+
+
+def send_quotation_offer_not_selected(
+    workshop_id: int,
+    quotation_id: int,
+    emergency_id: int | None,
+) -> None:
+    """Notifica al taller que su propuesta NO fue seleccionada por el cliente."""
+    logger.warning(
+        "Enviando quotation_offer_not_selected: quotation=%s workshop=%s",
+        quotation_id, workshop_id,
+    )
+    send_push_to_client(
+        workshop_id,
+        "Cotización no seleccionada",
+        "El cliente seleccionó otra propuesta para esta emergencia.",
+        {
+            "type": "quotation_offer_not_selected",
+            "quotation_id": str(quotation_id),
+            "emergency_id": str(emergency_id) if emergency_id is not None else "",
+            "status": "rechazada",
+            "workshop_name": "",
+            "price": "",
+        },
+    )
+
+
+def send_quotation_expired(
+    client_id: int | None,
+    quotation_id: int,
+    emergency_id: int | None,
+) -> None:
+    """Notifica al cliente que su solicitud de cotización expiró sin selección."""
+    if client_id is None:
+        logger.warning("quotation_expired: sin client_id para quotation %s", quotation_id)
+        return
+    logger.warning("Enviando quotation_expired: quotation=%s client=%s", quotation_id, client_id)
+    send_push_to_client(
+        client_id,
+        "Cotización expirada",
+        "Tu solicitud de cotización expiró sin propuesta seleccionada.",
+        {
+            "type": "quotation_expired",
+            "quotation_id": str(quotation_id),
+            "emergency_id": str(emergency_id) if emergency_id is not None else "",
+            "status": "expirado",
+            "workshop_name": "",
+            "price": "",
+        },
+    )
+
+
+def send_quotation_request_cancelled(
+    client_id: int | None,
+    quotation_id: int,
+    emergency_id: int | None,
+) -> None:
+    """Notifica al cliente que su solicitud de cotización fue cancelada."""
+    if client_id is None:
+        logger.warning("quotation_request_cancelled: sin client_id para quotation %s", quotation_id)
+        return
+    logger.warning("Enviando quotation_request_cancelled: quotation=%s client=%s", quotation_id, client_id)
+    send_push_to_client(
+        client_id,
+        "Cotización cancelada",
+        "Tu solicitud de cotización fue cancelada.",
+        {
+            "type": "quotation_request_cancelled",
+            "quotation_id": str(quotation_id),
+            "emergency_id": str(emergency_id) if emergency_id is not None else "",
+            "status": "cancelado",
+            "workshop_name": "",
+            "price": "",
+        },
+    )
+
+
 def compact_push_text(value: object, *, fallback: str, max_length: int = 120) -> str:
     text_value = normalize_optional_text(str(value)) if value is not None else None
     if not text_value:
@@ -751,3 +1067,205 @@ def add_coordinate_pair(
         return
     data[latitude_key] = normalized_latitude
     data[longitude_key] = normalized_longitude
+
+
+# =============================================================================
+# JWT / MULTI-TENANT — autenticación real con claims de tenant
+# =============================================================================
+
+_http_bearer = HTTPBearer(auto_error=False)
+
+
+class TokenPayload:
+    """Payload extraído del JWT de acceso.
+
+    Campos base (todos los roles):
+      user_id, role, tenant_id
+
+    Campos extendidos (roles Database-Per-Tenant):
+      tenant_slug  → slug del tenant en saas_master (para resolver el engine)
+      sucursal_id  → sucursal asignada (None para SUPERADMIN_TENANT)
+    """
+
+    def __init__(
+        self,
+        user_id: int,
+        role: str,
+        tenant_id: int | None,
+        tenant_slug: str | None = None,
+        sucursal_id: int | None = None,
+        technician_id: int | None = None,
+    ) -> None:
+        self.user_id = user_id
+        self.role = role
+        self.tenant_id = tenant_id
+        self.tenant_slug = tenant_slug
+        self.sucursal_id = sucursal_id
+        self.technician_id = technician_id
+
+    @property
+    def is_tenant_user(self) -> bool:
+        return normalize_role(self.role) in TENANT_ROLES
+
+    @property
+    def is_global_admin(self) -> bool:
+        return is_superadmin_global(self.role)
+
+
+def create_access_token(
+    user_id: int,
+    role: str,
+    tenant_id: int | None,
+    tenant_slug: str | None = None,
+    sucursal_id: int | None = None,
+    technician_id: int | None = None,
+) -> str:
+    """Genera un JWT firmado con claims multi-tenant."""
+    now = datetime.now(timezone.utc)
+    normalized_role = normalize_role(role)
+    payload: dict[str, object] = {
+        "sub": str(user_id),
+        "user_id": user_id,
+        "role": normalized_role,
+        "rol": normalized_role,
+        "tenant_id": tenant_id,
+        "tenant_slug": tenant_slug,
+        "sucursal_id": sucursal_id,
+        "technician_id": technician_id,
+        "iat": now,
+        "exp": now + timedelta(hours=settings.jwt_expiry_hours),
+    }
+    return pyjwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_access_token(token: str) -> dict[str, object]:
+    """Decodifica y valida la firma del JWT. Lanza JWTError si no es válido."""
+    return pyjwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+
+
+def _payload_to_token(payload: dict) -> TokenPayload:
+    """Convierte un dict de JWT decodificado en TokenPayload."""
+    resolved_role = normalize_role(str(payload.get("role") or payload.get("rol") or ""))
+    token = TokenPayload(
+        user_id=int(payload["user_id"]),
+        role=resolved_role,
+        tenant_id=int(payload["tenant_id"]) if payload.get("tenant_id") is not None else None,
+        tenant_slug=str(payload["tenant_slug"]) if payload.get("tenant_slug") else None,
+        sucursal_id=int(payload["sucursal_id"]) if payload.get("sucursal_id") is not None else None,
+        technician_id=int(payload["technician_id"]) if payload.get("technician_id") is not None else None,
+    )
+    if token.is_tenant_user and (token.tenant_id is None or not token.tenant_slug):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="TOKEN_TENANT_INVALIDO",
+        )
+    return token
+
+
+def get_effective_technician_id(current_user: TokenPayload | None) -> int | None:
+    """Devuelve el ID operativo del técnico para filtros de emergencias/WS."""
+    if current_user is None or normalize_role(current_user.role) != ROLE_TECNICO:
+        return None
+    if current_user.technician_id is not None:
+        return current_user.technician_id
+    return current_user.user_id
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_http_bearer),
+) -> TokenPayload:
+    """Dependencia FastAPI que extrae y valida el JWT del header Authorization."""
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="TOKEN_SIN_TENANT",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        payload = decode_access_token(credentials.credentials)
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expirado")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    role = normalize_role(str(payload.get("role") or payload.get("rol") or ""))
+    if not role:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="TOKEN_SIN_TENANT")
+    return _payload_to_token(payload)
+
+
+def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_http_bearer),
+) -> TokenPayload | None:
+    """Igual que get_current_user pero no falla si no hay token (endpoints públicos)."""
+    if not credentials:
+        return None
+    try:
+        payload = decode_access_token(credentials.credentials)
+        return _payload_to_token(payload)
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expirado")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+
+
+def require_admin(
+    current_user: TokenPayload = Depends(get_current_user),
+) -> TokenPayload:
+    """Dependencia FastAPI: sólo permite rol 'admin'."""
+    if not current_user.is_global_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ACCESO_DENEGADO_TENANT")
+    return current_user
+
+
+def validate_tenant_access(record: dict[str, object], current_user: TokenPayload) -> None:
+    """Valida que un registro pertenece al tenant del usuario autenticado.
+
+    Admin puede acceder a todo. Workshop/client sólo a su propio tenant.
+    """
+    if current_user.is_global_admin:
+        return
+    record_tenant = record.get("tenant_id")
+    if record_tenant is not None and int(record_tenant) != current_user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="REGISTRO_NO_PERTENECE_AL_TENANT")
+
+
+def get_tenant_id_for_query(current_user: TokenPayload | None) -> int | None:
+    """Devuelve el tenant_id a usar en una consulta SQL.
+
+    - admin / SUPERADMIN_GLOBAL (o sin token): None → sin filtro → ve todo
+    - workshop / tenant roles: su propio tenant_id → filtro aplicado
+    """
+    if current_user is None or current_user.is_global_admin:
+        return None
+    return current_user.tenant_id
+
+
+def require_superadmin_global(
+    current_user: TokenPayload = Depends(get_current_user),
+) -> TokenPayload:
+    """Dependencia: solo SUPERADMIN_GLOBAL o admin clásico puede acceder."""
+    if not current_user.is_global_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="SOLO_SUPERADMIN_GLOBAL")
+    return current_user
+
+
+def require_superadmin_tenant(
+    current_user: TokenPayload = Depends(get_current_user),
+) -> TokenPayload:
+    """Dependencia: SUPERADMIN_TENANT o superior puede acceder."""
+    allowed = {ROLE_SUPERADMIN_TENANT, ROLE_SUPERADMIN_GLOBAL}
+    if normalize_role(current_user.role) not in allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="SOLO_SUPERADMIN_TENANT")
+    return current_user
+
+
+def require_admin_sucursal(
+    current_user: TokenPayload = Depends(get_current_user),
+) -> TokenPayload:
+    """Dependencia: ADMIN_SUCURSAL o superior puede acceder."""
+    allowed = {
+        ROLE_ADMIN_SUCURSAL, ROLE_SUPERADMIN_TENANT, ROLE_SUPERADMIN_GLOBAL,
+    }
+    if normalize_role(current_user.role) not in allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="SOLO_ADMIN_SUCURSAL")
+    return current_user

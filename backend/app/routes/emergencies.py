@@ -1,14 +1,22 @@
+import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import OperationalError
 
 from app.utils import (
     EMERGENCY_STATUS_NOTIFICATION_LABELS,
     MAX_EMERGENCY_PHOTOS,
+    ROLE_ADMIN_SUCURSAL,
+    ROLE_CLIENTE,
+    ROLE_SUPERADMIN_GLOBAL,
+    ROLE_SUPERADMIN_TENANT,
+    ROLE_TECNICO,
+    TokenPayload,
     add_coordinate_pair,
     calculate_distance_meters,
     classify_emergency_photos,
@@ -17,10 +25,14 @@ from app.utils import (
     determine_standardized_problem_type,
     emergency_incident_label,
     ensure_client_exists,
+    get_effective_technician_id,
+    get_current_user,
+    get_tenant_id_for_query,
     normalize_emergency_media_fields,
     normalize_optional_text,
     normalize_plate,
     normalize_problem_type,
+    normalize_role,
     resolve_emergency_price,
     save_emergency_audio,
     send_emergency_reassigned_notification,
@@ -44,12 +56,16 @@ from app.db import (
     get_technician_by_workshop,
     get_workshop_by_id,
     list_emergency_reports,
+    list_emergency_reports_by_tenant,
     list_emergency_status_history,
     list_technicians_by_workshop,
     list_workshop_registrations,
     reassign_emergency_report_to_workshop,
     update_emergency_status,
 )
+from app.realtime import emit_realtime_events
+from app.realtime_types import RealtimeEmitEvent
+from app.tenant_context import get_tenant
 
 logger = logging.getLogger(__name__)
 LEGACY_EMERGENCY_STATUSES = {"pendiente", "activo", "rechazado"}
@@ -58,12 +74,19 @@ TIMELINE_EMERGENCY_STATUSES = {
     "en_revision",
     "auxilio_asignado",
     "auxilio_en_camino",
+    "tecnico_en_sitio",
     "servicio_en_proceso",
     "servicio_finalizado",
     "solicitud_cancelada",
 }
 SUPPORTED_EMERGENCY_STATUSES = LEGACY_EMERGENCY_STATUSES | TIMELINE_EMERGENCY_STATUSES
 EMERGENCY_TIMELINE_NOTIFICATION_STATUSES = set(EMERGENCY_STATUS_NOTIFICATION_LABELS)
+EMERGENCY_STATUS_REALTIME_EVENT_TYPES = {
+    "auxilio_en_camino": "technician_on_the_way",
+    "tecnico_en_sitio": "technician_on_site",
+    "servicio_en_proceso": "service_started",
+    "servicio_finalizado": "service_finished",
+}
 
 # =========================================================
 # ARCHIVO DE RUTAS DE EMERGENCIAS
@@ -86,6 +109,7 @@ class EmergencyReportResponse(BaseModel):
     id: int
     local_id: str | None = None
     client_id: int | None = None
+    client_name: str | None = None
     vehicle_name: str
     vehicle_plate: str
     problem_type: str
@@ -100,6 +124,7 @@ class EmergencyReportResponse(BaseModel):
     longitude: float | None = None
     address: str | None = None
     zone: str | None = None
+    sucursal_id: int | None = None
     nearest_workshop_id: int | None = None
     nearest_workshop_name: str | None = None
     nearest_workshop_specialty: str | None = None
@@ -115,7 +140,11 @@ class EmergencyReportResponse(BaseModel):
     audio_url: str | None = None
     rejection_reason: str | None = None
     rejected_at: datetime | None = None
+    hora_llegada: datetime | None = None
+    latitud_llegada: float | None = None
+    longitud_llegada: float | None = None
     created_at: datetime
+    updated_at: datetime | None = None
     assignment_id: int | None = None
     assignment_status: str | None = None
     assigned_technician_id: int | None = None
@@ -156,6 +185,8 @@ class EmergencyTimelineResponse(BaseModel):
 class EmergencyTimelineStatusUpdate(BaseModel):
     estado: str = Field(min_length=3, max_length=50)
     observacion: str | None = Field(default=None, max_length=4000)
+    latitud_llegada: float | None = Field(default=None)
+    longitud_llegada: float | None = Field(default=None)
 
 
 class EmergencyRejectRequest(BaseModel):
@@ -214,6 +245,165 @@ class EmergencyTrackingLocationRequest(BaseModel):
     source: str | None = Field(default="system", max_length=50)
 
 
+def _emergency_realtime_scope(report: Mapping[str, object]) -> tuple[int | None, str | None]:
+    tenant = get_tenant()
+    tenant_id = int(tenant["id"]) if tenant and tenant.get("id") is not None else None
+    tenant_slug = str(tenant["slug"]) if tenant and tenant.get("slug") else None
+
+    record_tenant = report.get("tenant_id")
+    if tenant_id is None and record_tenant is not None:
+        tenant_id = int(record_tenant)
+    record_slug = report.get("tenant_slug")
+    if tenant_slug is None and record_slug:
+        tenant_slug = str(record_slug)
+
+    return tenant_id, tenant_slug
+
+
+def _build_emergency_event_payload(
+    report: Mapping[str, object],
+    *,
+    extra_payload: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "emergency_id": int(report["id"]),
+        "status": report.get("emergency_status"),
+        "client_id": int(report["client_id"]) if report.get("client_id") is not None else None,
+        "assigned_technician_id": (
+            int(report["assigned_technician_id"]) if report.get("assigned_technician_id") is not None else None
+        ),
+        "nearest_workshop_id": (
+            int(report["nearest_workshop_id"]) if report.get("nearest_workshop_id") is not None else None
+        ),
+        "sucursal_id": int(report["sucursal_id"]) if report.get("sucursal_id") is not None else None,
+    }
+    if extra_payload:
+        payload.update(extra_payload)
+    return payload
+
+
+def _build_emergency_realtime_events(
+    event_type: str,
+    report: Mapping[str, object],
+    *,
+    include_client: bool = True,
+    include_technician: bool = True,
+    payload: Mapping[str, object] | None = None,
+) -> list[RealtimeEmitEvent]:
+    tenant_id, tenant_slug = _emergency_realtime_scope(report)
+    if tenant_id is None or not tenant_slug:
+        logger.warning(
+            "WS emergency event skipped event_type=%s emergency_id=%s tenant scope missing",
+            event_type,
+            report.get("id"),
+        )
+        return []
+
+    entity_id = int(report["id"])
+    sucursal_id = int(report["sucursal_id"]) if report.get("sucursal_id") is not None else None
+    client_id = int(report["client_id"]) if include_client and report.get("client_id") is not None else None
+    technician_id = (
+        int(report["assigned_technician_id"])
+        if include_technician and report.get("assigned_technician_id") is not None
+        else None
+    )
+    event_payload = _build_emergency_event_payload(report, extra_payload=payload)
+
+    events = [
+        RealtimeEmitEvent(
+            type=event_type,
+            tenant_id=tenant_id,
+            tenant_slug=tenant_slug,
+            entity_type="emergency",
+            entity_id=entity_id,
+            payload=event_payload,
+        )
+    ]
+
+    if sucursal_id is not None:
+        events.append(
+            RealtimeEmitEvent(
+                type=event_type,
+                tenant_id=tenant_id,
+                tenant_slug=tenant_slug,
+                sucursal_id=sucursal_id,
+                role_target=ROLE_ADMIN_SUCURSAL,
+                entity_type="emergency",
+                entity_id=entity_id,
+                payload=event_payload,
+            )
+        )
+    else:
+        logger.warning("WS emergency event event_type=%s emergency_id=%s without sucursal_id", event_type, entity_id)
+
+    if client_id is not None:
+        events.append(
+            RealtimeEmitEvent(
+                type=event_type,
+                tenant_id=tenant_id,
+                tenant_slug=tenant_slug,
+                user_id=client_id,
+                role_target=ROLE_CLIENTE,
+                entity_type="emergency",
+                entity_id=entity_id,
+                payload=event_payload,
+            )
+        )
+
+    if technician_id is not None:
+        events.append(
+            RealtimeEmitEvent(
+                type=event_type,
+                tenant_id=tenant_id,
+                tenant_slug=tenant_slug,
+                user_id=technician_id,
+                role_target=ROLE_TECNICO,
+                entity_type="emergency",
+                entity_id=entity_id,
+                payload=event_payload,
+            )
+        )
+
+    return events
+
+
+def _emit_emergency_realtime_events(
+    event_type: str,
+    report: Mapping[str, object],
+    *,
+    include_client: bool = True,
+    include_technician: bool = True,
+    payload: Mapping[str, object] | None = None,
+) -> None:
+    events = _build_emergency_realtime_events(
+        event_type,
+        report,
+        include_client=include_client,
+        include_technician=include_technician,
+        payload=payload,
+    )
+    if not events:
+        return
+    try:
+        asyncio.run(emit_realtime_events(events))
+    except Exception:
+        logger.exception(
+            "WS emergency emit failed event_type=%s emergency_id=%s",
+            event_type,
+            report.get("id"),
+        )
+
+
+def _emit_emergency_status_realtime_events(report: Mapping[str, object]) -> None:
+    _emit_emergency_realtime_events("emergency_status_updated", report)
+    normalized_status = validate_supported_emergency_status(
+        str(report.get("emergency_status")) if report.get("emergency_status") is not None else "pendiente"
+    )
+    specific_event_type = EMERGENCY_STATUS_REALTIME_EVENT_TYPES.get(normalized_status)
+    if specific_event_type:
+        _emit_emergency_realtime_events(specific_event_type, report)
+
+
 def validate_supported_emergency_status(status_value: str) -> str:
     normalized_status = normalize_optional_text(status_value)
     if normalized_status is None or normalized_status not in SUPPORTED_EMERGENCY_STATUSES:
@@ -229,6 +419,17 @@ def changed_by_context(*, workshop_id: int | None, fallback_role: str | None = N
     if workshop_id is not None:
         return "workshop", workshop_id
     return fallback_role, None
+
+
+def _infer_actor_from_current_user(current_user: TokenPayload) -> tuple[str | None, int | None]:
+    role = normalize_role(current_user.role)
+    if role == ROLE_CLIENTE:
+        return ROLE_CLIENTE, current_user.user_id
+    if role == ROLE_TECNICO:
+        return ROLE_TECNICO, current_user.user_id
+    if role in {ROLE_ADMIN_SUCURSAL, ROLE_SUPERADMIN_TENANT, ROLE_SUPERADMIN_GLOBAL}:
+        return role, current_user.user_id
+    return None, None
 
 
 def build_emergency_timeline_response(
@@ -256,6 +457,25 @@ def workshop_matches_emergency_specialty(workshop_specialty: object, target_spec
     if target_specialty is None or normalized_workshop_specialty is None:
         return False
     return normalized_workshop_specialty.casefold() == target_specialty.casefold()
+
+
+def workshop_matches_any_emergency_specialty(
+    workshop: dict[str, object],
+    target_specialty: str | None,
+) -> bool:
+    if target_specialty is None:
+        return False
+
+    specialties = [
+        normalize_optional_text(str(value))
+        for value in (workshop.get("specialties") or [])
+        if normalize_optional_text(str(value)) is not None
+    ]
+    primary_specialty = normalize_optional_text(str(workshop.get("specialty"))) if workshop.get("specialty") is not None else None
+    if primary_specialty and primary_specialty not in specialties:
+        specialties.insert(0, primary_specialty)
+
+    return any(specialty.casefold() == target_specialty.casefold() for specialty in specialties)
 
 
 def format_distance_text(distance_meters: float) -> str:
@@ -342,6 +562,62 @@ def build_emergency_tracking_response(report: dict[str, object]) -> EmergencyTra
     )
 
 
+BRANCH_SCOPED_ROLES = {ROLE_ADMIN_SUCURSAL, ROLE_TECNICO}
+
+
+def _scoped_sucursal_id(current_user: TokenPayload | None) -> int | None:
+    if current_user is not None and current_user.role in BRANCH_SCOPED_ROLES:
+        return current_user.sucursal_id
+    return None
+
+
+def _ensure_workshop_scope(workshop_id: int | None, current_user: TokenPayload | None) -> None:
+    scoped_sucursal_id = _scoped_sucursal_id(current_user)
+    if workshop_id is None or scoped_sucursal_id is None:
+        return
+    workshop = get_workshop_by_id(workshop_id)
+    if not workshop:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Taller no encontrado")
+    if workshop.get("sucursal_id") != scoped_sucursal_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ACCESO_DENEGADO_SUCURSAL")
+
+
+def _ensure_report_scope(report: Mapping[str, object], current_user: TokenPayload | None) -> None:
+    if current_user is None:
+        return
+    role = normalize_role(current_user.role)
+    if role == ROLE_SUPERADMIN_GLOBAL:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MODO_SOPORTE_REQUERIDO")
+    if role == ROLE_CLIENTE:
+        if report.get("client_id") != current_user.user_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Emergencia no encontrada")
+        return
+    if role == ROLE_TECNICO:
+        if report.get("assigned_technician_id") != get_effective_technician_id(current_user):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Emergencia no encontrada")
+    scoped_sucursal_id = _scoped_sucursal_id(current_user)
+    if scoped_sucursal_id is not None and report.get("sucursal_id") != scoped_sucursal_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ACCESO_DENEGADO_SUCURSAL")
+
+
+def _resolve_emergency_list_scope(
+    current_user: TokenPayload,
+    requested_client_id: int | None,
+) -> tuple[int | None, int | None]:
+    role = normalize_role(current_user.role)
+    if role == ROLE_SUPERADMIN_GLOBAL:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MODO_SOPORTE_REQUERIDO")
+    if role == ROLE_CLIENTE:
+        if requested_client_id is not None and requested_client_id != current_user.user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CLIENT_ID_AJENO_NO_PERMITIDO")
+        return current_user.user_id, None
+    if role == ROLE_TECNICO:
+        return requested_client_id, get_effective_technician_id(current_user)
+    if role in {ROLE_ADMIN_SUCURSAL, ROLE_SUPERADMIN_TENANT}:
+        return requested_client_id, None
+    return requested_client_id, None
+
+
 def find_alternative_workshop_for_emergency(
     report: dict[str, object],
     rejected_workshop_id: int | None,
@@ -381,7 +657,7 @@ def find_alternative_workshop_for_emergency(
                 latitude=float(workshop_latitude),
                 longitude=float(workshop_longitude),
                 distance_meters=distance_meters,
-                specialty_match=workshop_matches_emergency_specialty(workshop.get("specialty"), target_specialty),
+                specialty_match=workshop_matches_any_emergency_specialty(workshop, target_specialty),
             )
         )
 
@@ -401,6 +677,12 @@ def reassign_emergency_to_workshop(
 ) -> EmergencyReportResponse:
     clear_emergency_assignment(report_id)
     observation = f"Solicitud reasignada automaticamente al taller {alternative_workshop.workshop_name}"
+    alternative_workshop_record = get_workshop_by_id(alternative_workshop.id)
+    alternative_sucursal_id = (
+        int(alternative_workshop_record["sucursal_id"])
+        if alternative_workshop_record and alternative_workshop_record.get("sucursal_id") is not None
+        else None
+    )
     updated = reassign_emergency_report_to_workshop(
         report_id,
         nearest_workshop_id=alternative_workshop.id,
@@ -408,6 +690,7 @@ def reassign_emergency_to_workshop(
         nearest_workshop_specialty=alternative_workshop.specialty,
         nearest_workshop_zone=alternative_workshop.zone,
         nearest_workshop_distance_meters=alternative_workshop.distance_meters,
+        sucursal_id=alternative_sucursal_id,
         emergency_status="en_revision",
         previous_status="solicitud_cancelada",
         changed_by_role=changed_by_role,
@@ -470,6 +753,8 @@ def register_emergency_service(
     photo_paths: list[str] = []
     photo_urls: list[str] = []
     audio_path: str | None = None
+    workshop = get_workshop_by_id(nearest_workshop_id) if nearest_workshop_id is not None else None
+    sucursal_id = int(workshop["sucursal_id"]) if workshop and workshop.get("sucursal_id") is not None else None
     try:
         for photo in valid_photos:
             relative_path, public_url = save_emergency_photo(photo)
@@ -508,6 +793,7 @@ def register_emergency_service(
                 "nearest_workshop_specialty": normalize_optional_text(nearest_workshop_specialty),
                 "nearest_workshop_zone": normalize_optional_text(nearest_workshop_zone),
                 "nearest_workshop_distance_meters": nearest_workshop_distance_meters,
+                "sucursal_id": sucursal_id,
                 "audio_duration_seconds": audio_duration_seconds,
                 "audio_transcript": audio_transcript,
                 "audio_transcript_status": audio_transcript_status,
@@ -530,16 +816,25 @@ def register_emergency_service(
         cleanup_uploaded_files(*photo_paths, audio_path)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
     normalize_emergency_media_fields(created)
+    _emit_emergency_realtime_events(
+        "emergency_registered",
+        created,
+        include_technician=False,
+    )
     return EmergencyReportResponse.model_validate(created), False
 
 
 """
 Aqui esta la logica de listado de emergencias que consulta
-los reportes registrados con filtros opcionales por taller y estado.
+los reportes registrados con filtros opcionales por taller, estado y tenant.
 """
 def get_emergency_reports_service(
     nearest_workshop_id: int | None,
     emergency_status: str | None,
+    client_id: int | None,
+    tenant_id: int | None = None,
+    sucursal_id: int | None = None,
+    technician_id: int | None = None,
 ) -> list[EmergencyReportListResponse]:
     validated_status = (
         validate_supported_emergency_status(emergency_status)
@@ -547,10 +842,22 @@ def get_emergency_reports_service(
         else None
     )
     try:
-        rows = list_emergency_reports(
-            nearest_workshop_id=nearest_workshop_id,
-            emergency_status=validated_status,
-        )
+        if tenant_id is not None:
+            rows = list_emergency_reports_by_tenant(
+                nearest_workshop_id=nearest_workshop_id,
+                tenant_id=tenant_id,
+                emergency_status=validated_status,
+                sucursal_id=sucursal_id,
+                client_id=client_id,
+                technician_id=technician_id,
+            )
+        else:
+            rows = list_emergency_reports(
+                nearest_workshop_id=nearest_workshop_id,
+                emergency_status=validated_status,
+                client_id=client_id,
+                technician_id=technician_id,
+            )
     except OperationalError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
     for row in rows:
@@ -558,9 +865,26 @@ def get_emergency_reports_service(
     return [EmergencyReportListResponse.model_validate(row) for row in rows]
 
 
+def get_emergency_report_detail_service(
+    report_id: int,
+    workshop_id: int | None,
+    current_user: TokenPayload | None = None,
+) -> EmergencyReportResponse:
+    try:
+        report = get_emergency_report_by_id(report_id, nearest_workshop_id=workshop_id)
+    except OperationalError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
+    if not report:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Emergencia no encontrada")
+    _ensure_report_scope(report, current_user)
+    normalize_emergency_media_fields(report)
+    return EmergencyReportResponse.model_validate(report)
+
+
 def get_emergency_timeline_service(
     report_id: int,
     workshop_id: int | None,
+    current_user: TokenPayload | None = None,
 ) -> EmergencyTimelineResponse:
     try:
         report = get_emergency_report_by_id(report_id, nearest_workshop_id=workshop_id)
@@ -572,6 +896,7 @@ def get_emergency_timeline_service(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Emergencia no encontrada o no pertenece al taller indicado",
         )
+    _ensure_report_scope(report, current_user)
     return build_emergency_timeline_response(report, timeline_rows)
 
 
@@ -579,6 +904,7 @@ def change_emergency_status_service(
     report_id: int,
     next_status: str,
     workshop_id: int | None,
+    current_user: TokenPayload,
     *,
     observation: str | None = None,
     require_workshop_for_active: bool = False,
@@ -587,6 +913,8 @@ def change_emergency_status_service(
     rejection_reason: str | None = None,
     rejected_at: datetime | None = None,
     clear_rejection_metadata: bool = False,
+    latitud_llegada: float | None = None,
+    longitud_llegada: float | None = None,
 ) -> EmergencyReportResponse:
     validated_status = validate_supported_emergency_status(next_status)
     if require_workshop_for_active and validated_status == "activo" and workshop_id is None:
@@ -594,10 +922,26 @@ def change_emergency_status_service(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Solo un taller puede cambiar una emergencia a activo",
         )
+    try:
+        current_report = get_emergency_report_by_id(report_id, nearest_workshop_id=workshop_id)
+    except OperationalError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
+    if not current_report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Emergencia no encontrada o no pertenece al taller indicado",
+        )
+    _ensure_report_scope(current_report, current_user)
+    if normalize_role(current_user.role) == ROLE_CLIENTE:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CLIENTE_NO_PUEDE_ACTUALIZAR_ESTADO")
     inferred_role, inferred_user_id = changed_by_context(
         workshop_id=workshop_id,
         fallback_role="admin",
     )
+    if workshop_id is None:
+        user_role, user_id = _infer_actor_from_current_user(current_user)
+        inferred_role = user_role or inferred_role
+        inferred_user_id = user_id if user_id is not None else inferred_user_id
     changed_by_role = normalize_optional_text(changed_by_role) or inferred_role
     changed_by_user_id = changed_by_user_id if changed_by_user_id is not None else inferred_user_id
     try:
@@ -611,6 +955,8 @@ def change_emergency_status_service(
             rejection_reason=normalize_optional_text(rejection_reason),
             rejected_at=rejected_at,
             clear_rejection_metadata=clear_rejection_metadata,
+            latitud_llegada=latitud_llegada,
+            longitud_llegada=longitud_llegada,
         )
     except OperationalError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
@@ -631,11 +977,15 @@ def edit_emergency_status_service(
     report_id: int,
     payload: EmergencyStatusUpdate,
     workshop_id: int | None,
+    current_user: TokenPayload,
 ) -> EmergencyReportResponse:
+    if normalize_role(current_user.role) == ROLE_TECNICO:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="TECNICO_NO_PUEDE_ACEPTAR_O_RECHAZAR")
     updated = change_emergency_status_service(
         report_id,
         payload.emergency_status,
         workshop_id,
+        current_user,
         require_workshop_for_active=True,
     )
     if payload.emergency_status == "activo":
@@ -654,6 +1004,7 @@ def edit_emergency_status_service(
                 "incident_description": incident_label,
             },
         )
+    _emit_emergency_status_realtime_events(updated.model_dump())
     return updated
 
 
@@ -661,12 +1012,23 @@ def update_emergency_timeline_status_service(
     report_id: int,
     payload: EmergencyTimelineStatusUpdate,
     workshop_id: int | None,
+    current_user: TokenPayload,
 ) -> EmergencyTimelineResponse:
+    if normalize_role(current_user.role) == ROLE_TECNICO and payload.estado not in {
+        "auxilio_en_camino",
+        "tecnico_en_sitio",
+        "servicio_en_proceso",
+        "servicio_finalizado",
+    }:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ESTADO_NO_PERMITIDO_PARA_TECNICO")
     updated = change_emergency_status_service(
         report_id,
         payload.estado,
         workshop_id,
+        current_user,
         observation=payload.observacion,
+        latitud_llegada=payload.latitud_llegada,
+        longitud_llegada=payload.longitud_llegada,
     )
     normalized_status = validate_supported_emergency_status(payload.estado)
     if normalized_status in EMERGENCY_TIMELINE_NOTIFICATION_STATUSES:
@@ -677,6 +1039,7 @@ def update_emergency_timeline_status_service(
             normalized_status,
             EMERGENCY_STATUS_NOTIFICATION_LABELS[normalized_status],
         )
+    _emit_emergency_status_realtime_events(updated.model_dump())
     return get_emergency_timeline_service(report_id, workshop_id)
 
 
@@ -684,7 +1047,10 @@ def reject_emergency_service(
     report_id: int,
     payload: EmergencyRejectRequest,
     workshop_id: int | None,
+    current_user: TokenPayload,
 ) -> EmergencyRejectionResponse:
+    if normalize_role(current_user.role) in {ROLE_CLIENTE, ROLE_TECNICO}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROL_NO_AUTORIZADO_PARA_RECHAZAR")
     rejection_reason = normalize_optional_text(payload.motivo)
     if rejection_reason is None:
         raise HTTPException(
@@ -741,6 +1107,7 @@ def reject_emergency_service(
         report_id,
         "solicitud_cancelada",
         workshop_id,
+        current_user,
         observation=rejection_reason,
         changed_by_role=payload.changed_by_role,
         changed_by_user_id=payload.changed_by_user_id,
@@ -792,6 +1159,12 @@ def reject_emergency_service(
         report_id,
         alternative_workshop.id if alternative_workshop is not None else None,
     )
+    _emit_emergency_realtime_events(
+        "request_rejected",
+        updated.model_dump(),
+        include_technician=False,
+        payload={"rejection_reason": updated.rejection_reason},
+    )
     return EmergencyRejectionResponse(
         emergency=updated,
         timeline=timeline,
@@ -806,7 +1179,10 @@ def assign_technician_to_emergency_service(
     report_id: int,
     payload: EmergencyTechnicianAssignmentRequest,
     workshop_id: int,
+    current_user: TokenPayload,
 ) -> EmergencyReportListResponse:
+    if normalize_role(current_user.role) in {ROLE_CLIENTE, ROLE_TECNICO}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROL_NO_AUTORIZADO_PARA_ASIGNAR")
     try:
         technician = get_technician_by_workshop(payload.technician_id, workshop_id)
         workshop_reports = list_emergency_reports(nearest_workshop_id=workshop_id)
@@ -820,6 +1196,7 @@ def assign_technician_to_emergency_service(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Emergencia no encontrada o no pertenece a este taller",
         )
+    _ensure_report_scope(report, current_user)
     if report.get("emergency_status") != "activo":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -871,6 +1248,11 @@ def assign_technician_to_emergency_service(
         f"{technician_name} de {workshop_name} atendera: {incident_label}",
         push_data,
     )
+    _emit_emergency_realtime_events(
+        "technician_assigned",
+        updated_report,
+        payload={"assigned_technician_id": payload.technician_id},
+    )
     return EmergencyReportListResponse.model_validate(updated_report)
 
 
@@ -891,6 +1273,7 @@ def register_emergency_tracking_location_service(
     report_id: int,
     payload: EmergencyTrackingLocationRequest,
     workshop_id: int | None,
+    current_user: TokenPayload,
 ) -> EmergencyTrackingResponse:
     try:
         report = get_emergency_report_by_id(report_id, nearest_workshop_id=workshop_id)
@@ -898,6 +1281,12 @@ def register_emergency_tracking_location_service(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Emergencia no encontrada o no pertenece al taller indicado",
+            )
+        _ensure_report_scope(report, current_user)
+        if normalize_role(current_user.role) == ROLE_TECNICO and payload.technician_id != get_effective_technician_id(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="TECNICO_NO_PUEDE_REPORTAR_UBICACION_DE_OTRO_USUARIO",
             )
         assigned_technician_id = int(report["assigned_technician_id"]) if report.get("assigned_technician_id") is not None else None
         if assigned_technician_id is not None and assigned_technician_id != payload.technician_id:
@@ -917,7 +1306,19 @@ def register_emergency_tracking_location_service(
         refreshed_report = get_emergency_report_by_id(report_id, nearest_workshop_id=workshop_id)
         if not refreshed_report:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Emergencia no encontrada")
-        return build_emergency_tracking_response(refreshed_report)
+        tracking_response = build_emergency_tracking_response(refreshed_report)
+        _emit_emergency_realtime_events(
+            "tracking_location_updated",
+            refreshed_report,
+            include_technician=False,
+            payload={
+                "technician_id": payload.technician_id,
+                "tracking_latitude": payload.latitude,
+                "tracking_longitude": payload.longitude,
+                "tracking_source": normalize_optional_text(payload.source) or "system",
+            },
+        )
+        return tracking_response
     except OperationalError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
 
@@ -1009,9 +1410,35 @@ def register_emergency(
 # Aqui esta el controlador GET de listado de emergencias que obtiene los reportes registrados.
 def get_emergency_reports(
     nearest_workshop_id: int | None = Query(default=None, ge=1),
+    client_id: int | None = Query(default=None, ge=1),
     emergency_status: str | None = Query(default=None),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> list[EmergencyReportListResponse]:
-    return get_emergency_reports_service(nearest_workshop_id, emergency_status)
+    _ensure_workshop_scope(nearest_workshop_id, current_user)
+    tenant_id = get_tenant_id_for_query(current_user)
+    sucursal_id = _scoped_sucursal_id(current_user)
+    effective_client_id, effective_technician_id = _resolve_emergency_list_scope(current_user, client_id)
+    return get_emergency_reports_service(
+        nearest_workshop_id,
+        emergency_status,
+        effective_client_id,
+        tenant_id,
+        sucursal_id,
+        effective_technician_id,
+    )
+
+
+@router.get(
+    f"{settings.api_prefix}/emergencias/{{report_id}}",
+    response_model=EmergencyReportResponse,
+)
+def get_emergency_report_detail(
+    report_id: int,
+    workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
+) -> EmergencyReportResponse:
+    _ensure_workshop_scope(workshop_id, current_user)
+    return get_emergency_report_detail_service(report_id, workshop_id, current_user)
 
 
 @router.get(
@@ -1021,8 +1448,10 @@ def get_emergency_reports(
 def get_emergency_timeline(
     report_id: int,
     workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> EmergencyTimelineResponse:
-    return get_emergency_timeline_service(report_id, workshop_id)
+    _ensure_workshop_scope(workshop_id, current_user)
+    return get_emergency_timeline_service(report_id, workshop_id, current_user)
 
 
 @router.get(
@@ -1032,8 +1461,11 @@ def get_emergency_timeline(
 def get_emergency_tracking(
     report_id: int,
     workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> EmergencyTrackingResponse:
-    return get_emergency_tracking_service(report_id, workshop_id)
+    _ensure_workshop_scope(workshop_id, current_user)
+    report = get_emergency_report_detail_service(report_id, workshop_id, current_user)
+    return build_emergency_tracking_response(report.model_dump())
 
 
 @router.post(
@@ -1044,8 +1476,10 @@ def register_emergency_tracking_location(
     report_id: int,
     payload: EmergencyTrackingLocationRequest,
     workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> EmergencyTrackingResponse:
-    return register_emergency_tracking_location_service(report_id, payload, workshop_id)
+    _ensure_workshop_scope(workshop_id, current_user)
+    return register_emergency_tracking_location_service(report_id, payload, workshop_id, current_user)
 
 
 @router.put(
@@ -1057,8 +1491,10 @@ def edit_emergency_status(
     report_id: int,
     payload: EmergencyStatusUpdate,
     workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> EmergencyReportResponse:
-    return edit_emergency_status_service(report_id, payload, workshop_id)
+    _ensure_workshop_scope(workshop_id, current_user)
+    return edit_emergency_status_service(report_id, payload, workshop_id, current_user)
 
 
 @router.patch(
@@ -1069,8 +1505,10 @@ def update_emergency_timeline_status(
     report_id: int,
     payload: EmergencyTimelineStatusUpdate,
     workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> EmergencyTimelineResponse:
-    return update_emergency_timeline_status_service(report_id, payload, workshop_id)
+    _ensure_workshop_scope(workshop_id, current_user)
+    return update_emergency_timeline_status_service(report_id, payload, workshop_id, current_user)
 
 
 @router.patch(
@@ -1081,8 +1519,10 @@ def reject_emergency(
     report_id: int,
     payload: EmergencyRejectRequest,
     workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> EmergencyRejectionResponse:
-    return reject_emergency_service(report_id, payload, workshop_id)
+    _ensure_workshop_scope(workshop_id, current_user)
+    return reject_emergency_service(report_id, payload, workshop_id, current_user)
 
 
 @router.put(
@@ -1094,8 +1534,10 @@ def assign_technician_to_emergency(
     report_id: int,
     payload: EmergencyTechnicianAssignmentRequest,
     workshop_id: int = Query(ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
 ) -> EmergencyReportListResponse:
-    return assign_technician_to_emergency_service(report_id, payload, workshop_id)
+    _ensure_workshop_scope(workshop_id, current_user)
+    return assign_technician_to_emergency_service(report_id, payload, workshop_id, current_user)
 
 
 @router.delete(
@@ -1103,5 +1545,10 @@ def assign_technician_to_emergency(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 # Aqui esta el controlador DELETE de eliminacion de emergencia que borra un reporte de emergencia.
-def remove_emergency_report(report_id: int, workshop_id: int | None = Query(default=None, ge=1)) -> None:
+def remove_emergency_report(
+    report_id: int,
+    workshop_id: int | None = Query(default=None, ge=1),
+    current_user: TokenPayload = Depends(get_current_user),
+) -> None:
+    _ensure_workshop_scope(workshop_id, current_user)
     remove_emergency_report_service(report_id, workshop_id)

@@ -7,7 +7,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 
 import { API_BASE_URL } from '../shared/api-base';
 import { ValidationDialogComponent } from '../shared/validation-dialog.component';
-import { clearStoredSession } from './session';
+import { clearStoredSession, normalizeRole } from './session';
 
 @Component({
   selector: 'app-login-page',
@@ -25,21 +25,29 @@ import { clearStoredSession } from './session';
             <div class="login-clean-tabs">
               <button
                 type="button"
-                [class.is-active]="selectedRole === 'socio'"
-                (click)="selectRole('socio')"
-              >
-                Socio del Taller
-              </button>
-              <button
-                type="button"
                 [class.is-active]="selectedRole === 'admin'"
                 (click)="selectRole('admin')"
               >
-                Administrador
+                Administrador SaaS
+              </button>
+              <button
+                type="button"
+                [class.is-active]="selectedRole === 'empresa'"
+                (click)="selectRole('empresa')"
+              >
+                Mi Empresa
               </button>
             </div>
 
             <h1>Inicio de Sesión</h1>
+
+            <p *ngIf="selectedRole === 'admin'" style="font-size:0.85rem;color:#555;margin-bottom:0.5rem;">
+              Acceso exclusivo para <strong>SUPERADMIN_GLOBAL</strong> de la plataforma.
+            </p>
+
+            <p *ngIf="selectedRole === 'empresa'" style="font-size:0.85rem;color:#555;margin-bottom:0.5rem;">
+              Acceso para <strong>SUPERADMIN_TENANT</strong>, <strong>ADMIN_SUCURSAL</strong> y <strong>TECNICO</strong> de empresas registradas.
+            </p>
 
             <!--
               AQUI ESTA EL FORMULARIO DE INICIO DE SESION
@@ -93,6 +101,15 @@ import { clearStoredSession } from './session';
               </label>
 
               <a class="login-clean-option" routerLink="/forgot-password">¿Olvidaste tu contraseña?</a>
+
+              <a
+                *ngIf="selectedRole === 'empresa'"
+                class="login-clean-option"
+                routerLink="/registro-taller"
+                style="text-align:center; font-weight:600; color: var(--color-primary, #1a73e8);"
+              >
+                ¿No tienes cuenta? Registra tu empresa →
+              </a>
             </form>
           </article>
         </div>
@@ -109,14 +126,14 @@ export class LoginPageComponent {
   private readonly loginApiUrl = `${API_BASE_URL}/auth/login`;
   private readonly appSessionStorageKey = 'acb_session';
 
-  selectedRole: 'socio' | 'admin' = 'admin';
+  selectedRole: 'admin' | 'empresa' = 'admin';
   showPassword = false;
   submitMessage = '';
   isSubmitting = false;
   private readonly maxLoginAttempts = 3;
-  private loginAttemptsRemaining: Record<'socio' | 'admin', number> = {
-    socio: this.maxLoginAttempts,
+  private loginAttemptsRemaining: Record<'admin' | 'empresa', number> = {
     admin: this.maxLoginAttempts,
+    empresa: this.maxLoginAttempts,
   };
 
   form = {
@@ -129,7 +146,7 @@ export class LoginPageComponent {
     return this.loginAttemptsRemaining[this.selectedRole];
   }
 
-  selectRole(role: 'socio' | 'admin'): void {
+  selectRole(role: 'admin' | 'empresa'): void {
     this.selectedRole = role;
     this.submitMessage = '';
   }
@@ -156,11 +173,13 @@ export class LoginPageComponent {
     this.submitMessage = '';
     clearStoredSession();
 
+    const accountType = this.selectedRole === 'admin' ? 'admin' : 'tenant';
+
     this.http
       .post<LoginResponse>(this.loginApiUrl, {
         email: this.form.email.trim().toLowerCase(),
         password: this.form.password,
-        account_type: this.selectedRole === 'admin' ? 'admin' : 'workshop',
+        account_type: accountType,
       })
       .subscribe({
         next: async (response) => {
@@ -176,14 +195,19 @@ export class LoginPageComponent {
             return;
           }
 
-          const expectedRole = this.selectedRole === 'admin' ? 'admin' : 'workshop';
+          const normalizedRole = normalizeRole(response.role);
+          const tenantRoles = ['SUPERADMIN_TENANT', 'ADMIN_SUCURSAL', 'TECNICO', 'CLIENTE'];
+          const isValidForTab =
+            this.selectedRole === 'admin'
+              ? normalizedRole === 'SUPERADMIN_GLOBAL'
+              : tenantRoles.includes(normalizedRole);
 
-          if (response.role !== expectedRole) {
+          if (!isValidForTab) {
             this.isSubmitting = false;
             this.submitMessage =
               this.selectedRole === 'admin'
-                ? 'Esta pantalla está reservada para la cuenta administradora.'
-                : 'Este acceso corresponde a un usuario diferente.';
+                ? 'Esta pantalla es exclusiva para SUPERADMIN_GLOBAL de la plataforma.'
+                : 'Este correo no corresponde a una cuenta de empresa. Usa la pestaña correcta.';
             return;
           }
 
@@ -230,7 +254,9 @@ export class LoginPageComponent {
       account_type?: string;
       remaining_attempts?: number;
     };
-    const targetRole = parsedDetail.account_type === 'admin' ? 'admin' : 'socio';
+    const targetRole: 'admin' | 'empresa' =
+      parsedDetail.account_type === 'admin' ? 'admin' :
+      'empresa';
 
     if (typeof parsedDetail.remaining_attempts === 'number') {
       this.loginAttemptsRemaining[targetRole] = Math.max(0, parsedDetail.remaining_attempts);
@@ -281,8 +307,11 @@ export class LoginPageComponent {
       email: response.email,
       fullName: response.full_name,
       phone: response.phone,
-      role: response.role,
+      role: normalizeRole(response.role),
       status: response.status,
+      tenantId: response.tenant_id ?? null,
+      tenantSlug: response.tenant_slug ?? null,
+      sucursalId: response.sucursal_id ?? null,
       accessToken: response.access_token,
       tokenType: response.token_type,
     });
@@ -300,6 +329,9 @@ type LoginResponse = {
   phone: string;
   role: string;
   status: string;
+  tenant_id: number | null;
+  tenant_slug: string | null;
+  sucursal_id: number | null;
   requires_password_change: boolean;
   access_token: string | null;
   token_type: string | null;

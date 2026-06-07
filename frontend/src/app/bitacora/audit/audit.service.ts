@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core';
 import { map, Observable } from 'rxjs';
+import { SessionRequestContext } from '../../auth/session-context';
 import { EmergenciesService } from '../../emergencias/emergencies/emergencies.service';
 import { AuditItem, AuditTone, MaintenanceRequest } from '../../emergencias/emergencies/emergencies.model';
 
@@ -9,8 +10,8 @@ import { AuditItem, AuditTone, MaintenanceRequest } from '../../emergencias/emer
 export class AuditService {
   constructor(private readonly emergenciesService: EmergenciesService) {}
 
-  loadAuditItems(workshopId: number | null): Observable<AuditItem[]> {
-    return this.emergenciesService.listEmergencyReports(workshopId).pipe(
+  loadAuditItems(context: SessionRequestContext): Observable<AuditItem[]> {
+    return this.emergenciesService.listEmergencyReports(context).pipe(
       map((reports) =>
         reports
           .map((report) => this.emergenciesService.mapEmergencyReportToRequest(report))

@@ -4,10 +4,92 @@ import { Component, ElementRef, OnDestroy, ViewChild, inject } from '@angular/co
 import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
-import { APP_SESSION_STORAGE_KEY, AppSession, clearStoredSession, parseStoredSession } from '../auth/session';
+import { Subscription } from 'rxjs';
+import {
+  APP_SESSION_STORAGE_KEY,
+  AppSession,
+  clearStoredSession,
+  isGlobalAdmin,
+  isSucursalAdmin,
+  isTechnicianRole,
+  isTenantRole,
+  isTenantSuperadmin,
+  parseStoredSession,
+} from '../auth/session';
+import { RealtimeService } from '../realtime/realtime.service';
+import { ConnectionState } from '../realtime/realtime.types';
 import { API_BASE_URL, BACKEND_BASE_URL } from '../shared/api-base';
 
 declare const L: any;
+
+type SucursalRecord = {
+  id: number;
+  nombre: string;
+  direccion: string;
+  zona: string | null;
+  ciudad: string;
+  latitud: number | null;
+  longitud: number | null;
+  telefono: string | null;
+  responsable: string | null;
+  workshop_id: number | null;
+  workshop_name: string | null;
+  workshop_specialty: string | null;
+  especialidades: string[];
+  workshop_approval_status: string | null;
+  workshop_availability_status: string | null;
+  technicians_count: number;
+  estado: string;
+};
+
+type SucursalZoneOption = {
+  label: string;
+  value: string;
+};
+
+type ReverseGeocodeResponse = {
+  display_name?: string;
+  address?: {
+    road?: string;
+    pedestrian?: string;
+    suburb?: string;
+    neighbourhood?: string;
+    city?: string;
+    town?: string;
+    village?: string;
+  };
+};
+
+type SucursalFormModel = {
+  nombre: string;
+  direccion: string;
+  zona: string;
+  ciudad: string;
+  latitud: number | null;
+  longitud: number | null;
+  telefono: string;
+  responsable: string;
+  especialidades: string[];
+};
+
+type UsuarioEmpresaRecord = {
+  id: number;
+  email: string;
+  full_name: string;
+  phone: string;
+  role: string;
+  sucursal_id: number | null;
+  estado: string;
+};
+
+type UsuarioEmpresaFormModel = {
+  email: string;
+  full_name: string;
+  phone: string;
+  password: string;
+  role: string;
+  sucursal_id: number | null;
+};
 
 type DashboardSection =
   | 'dashboard'
@@ -18,7 +100,13 @@ type DashboardSection =
   | 'emergencies'
   | 'reports'
   | 'audit'
-  | 'sync';
+  | 'sync'
+  | 'quotation_requests'
+  | 'quotation_history'
+  | 'contracted_services'
+  | 'tenants'
+  | 'sucursales'
+  | 'usuarios_empresa';
 type SyncTab = 'queue' | 'errors' | 'history';
 type TechnicianStatus = 'disponible' | 'ocupado' | 'fuera_de_servicio';
 type TechnicianFilter = 'activos' | 'todos' | 'historial';
@@ -31,6 +119,7 @@ type EmergencyTimelineStatus =
   | 'en_revision'
   | 'auxilio_asignado'
   | 'auxilio_en_camino'
+  | 'tecnico_en_sitio'
   | 'servicio_en_proceso'
   | 'servicio_finalizado'
   | 'solicitud_cancelada';
@@ -47,6 +136,8 @@ const TECHNICIAN_SPECIALTY_OPTIONS = [
   'Cerrajería / llaves',
 ];
 
+const ACTIVE_TECHNICIAN_STATUSES: TechnicianStatus[] = ['disponible', 'ocupado'];
+
 const WORKSHOP_ZONE_OPTIONS = [
   'zona norte',
   'zona sur',
@@ -54,6 +145,19 @@ const WORKSHOP_ZONE_OPTIONS = [
   'zona oeste',
   'zona centro',
 ];
+
+const SUCURSAL_ZONE_OPTIONS: SucursalZoneOption[] = [
+  { label: 'zona norte', value: 'Norte' },
+  { label: 'zona sur', value: 'Sur' },
+  { label: 'zona este', value: 'Este' },
+  { label: 'zona oeste', value: 'Oeste' },
+  { label: 'zona centro', value: 'Centro' },
+];
+
+const SANTA_CRUZ_DEFAULT_COORDINATES = {
+  latitud: -17.7833,
+  longitud: -63.1821,
+};
 
 const WORKSHOP_SPECIALTY_OPTIONS = [
   'Batería',
@@ -65,6 +169,16 @@ const WORKSHOP_SPECIALTY_OPTIONS = [
   'Cerrajería / llaves',
 ];
 
+const SUCURSAL_SPECIALTY_OPTIONS = [
+  'Batería',
+  'Motor',
+  'Electricidad',
+  'Llanta',
+  'Choque',
+  'Grúa',
+  'Mecánica general',
+];
+
 const EMERGENCY_TIMELINE_STEPS: Array<{
   status: EmergencyTimelineStatus;
   label: string;
@@ -74,6 +188,7 @@ const EMERGENCY_TIMELINE_STEPS: Array<{
   { status: 'en_revision', label: 'En revisión', icon: '◌' },
   { status: 'auxilio_asignado', label: 'Auxilio asignado', icon: '✓' },
   { status: 'auxilio_en_camino', label: 'Auxilio en camino', icon: '➜' },
+  { status: 'tecnico_en_sitio', label: 'Técnico en sitio', icon: '📍' },
   { status: 'servicio_en_proceso', label: 'Servicio en proceso', icon: '⚙' },
   { status: 'servicio_finalizado', label: 'Servicio finalizado', icon: '★' },
   { status: 'solicitud_cancelada', label: 'Cancelada', icon: '✕' },
@@ -84,6 +199,38 @@ const LEGACY_TO_TIMELINE_STATUS_MAP: Record<LegacyEmergencyStatus, EmergencyTime
   activo: 'auxilio_asignado',
   rechazado: 'solicitud_cancelada',
 };
+
+type RealtimeRefreshRequest = {
+  overview?: boolean;
+  emergencies?: boolean;
+  quotationRequests?: boolean;
+  quotationHistory?: boolean;
+  contractedServices?: boolean;
+  tracking?: boolean;
+};
+
+const DASHBOARD_EMERGENCY_REFRESH_EVENT_TYPES = new Set([
+  'emergency_registered',
+  'technician_assigned',
+  'emergency_status_updated',
+  'technician_on_the_way',
+  'technician_on_site',
+  'service_started',
+  'service_finished',
+  'request_rejected',
+]);
+
+const DASHBOARD_QUOTATION_REFRESH_EVENT_TYPES = new Set([
+  'quotation_requested',
+  'quotation_submitted',
+  'quotation_accepted',
+  'quotation_request_sent',
+  'quotation_offer_received',
+  'quotation_offer_selected',
+  'quotation_offer_not_selected',
+  'quotation_expired',
+  'quotation_request_cancelled',
+]);
 
 type DashboardStat = {
   label: string;
@@ -120,6 +267,22 @@ type DashboardZoneBreakdownItem = {
   count: number;
 };
 
+type DashboardIncidentTypeBreakdownItem = {
+  incident_type: string;
+  label: string;
+  count: number;
+};
+
+type DashboardEfficiencyRankingItem = {
+  workshop_id: number | null;
+  workshop_name: string;
+  completed_services: number;
+  avg_assignment_minutes: number | null;
+  avg_arrival_minutes: number | null;
+  avg_resolution_minutes: number | null;
+  sla_compliance_percent: number | null;
+};
+
 type DashboardRecentEmergencyItem = {
   emergency_id: number;
   code: string;
@@ -132,7 +295,7 @@ type DashboardRecentEmergencyItem = {
 };
 
 type DashboardOperationalOverview = {
-  scope: 'global' | 'workshop';
+  scope: 'global' | 'global_saas' | 'workshop' | 'tenant' | 'sucursal' | 'technician' | 'client';
   workshop_id: number | null;
   workshop_name: string | null;
   generated_at: string;
@@ -141,6 +304,9 @@ type DashboardOperationalOverview = {
   status_breakdown: DashboardStatusBreakdownItem[];
   tenant_ranking: DashboardTenantRankingItem[];
   zone_breakdown: DashboardZoneBreakdownItem[];
+  analytics_summary: DashboardOperationalSummaryItem[];
+  incident_type_breakdown: DashboardIncidentTypeBreakdownItem[];
+  efficiency_ranking: DashboardEfficiencyRankingItem[];
   recent_emergencies: DashboardRecentEmergencyItem[];
 };
 
@@ -193,6 +359,9 @@ type MaintenanceRequest = {
   assignedTechnicianSpecialty: string | null;
   rejectionReason: string | null;
   rejectedAt: string | null;
+  horaLlegada: string | null;
+  latitudLlegada: number | null;
+  longitudLlegada: number | null;
 };
 
 type EmergencyReport = {
@@ -206,8 +375,13 @@ type EmergencyReport = {
   price: number | null;
   emergency_status: EmergencyStatus | null;
   problem_type_standardized: string | null;
+  photo_problem_type_standardized?: string | null;
+  photo_classification_confidence?: number | null;
+  photo_classification_error?: string | null;
   description: string | null;
   audio_transcript: string | null;
+  audio_transcript_status?: string | null;
+  audio_transcript_error?: string | null;
   photo_paths?: string[] | string | null;
   photo_urls: string[] | string | null;
   audio_url: string | null;
@@ -229,6 +403,10 @@ type EmergencyReport = {
   assigned_technician_specialty: string | null;
   rejection_reason: string | null;
   rejected_at: string | null;
+  hora_llegada: string | null;
+  latitud_llegada: number | null;
+  longitud_llegada: number | null;
+  updated_at: string | null;
   created_at: string;
 };
 
@@ -241,6 +419,7 @@ type WorkshopRegistration = {
   zone: string;
   specialty: string;
   approval_status: WorkshopApprovalStatus;
+  availability_status?: string;
   latitude: number | null;
   longitude: number | null;
   timezone: string | null;
@@ -297,11 +476,14 @@ type EmergencyTrackingResponse = {
 type Technician = {
   id: number;
   workshop_id: number | null;
+  usuario_tenant_id: number | null;
   full_name: string;
   phone: string;
   email: string;
   specialty: string;
   status: TechnicianStatus;
+  sucursal_id: number | null;
+  sucursal_nombre: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -312,6 +494,7 @@ type TechnicianFormModel = {
   email: string;
   specialty: string;
   status: TechnicianStatus;
+  sucursal_id: number | null;
 };
 
 type Client = {
@@ -338,6 +521,15 @@ type ClientFormModel = {
   accepted_terms: boolean;
 };
 
+type TenantRecord = {
+  id: number;
+  nombre: string;
+  descripcion: string | null;
+  estado: string;
+  created_at: string;
+  updated_at: string;
+};
+
 type WorkshopFormModel = {
   workshop_name: string;
   contact_name: string;
@@ -348,6 +540,109 @@ type WorkshopFormModel = {
   latitude: number | null;
   longitude: number | null;
   password: string;
+};
+
+type QuotationRequest = {
+  id: number;
+  emergency_id: number | null;
+  client_id: number | null;
+  status: string;
+  requested_workshops_count: number;
+  received_offers_count: number;
+  selected_offer_id: number | null;
+  requested_at: string;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+  workshop_invitation_status?: string | null;
+  notified_at?: string | null;
+  client_name?: string | null;
+  client_phone?: string | null;
+  workshop_names?: string | null;
+  visible_workshops_count?: number | null;
+  selected_workshop_name?: string | null;
+  selected_offer_price?: number | null;
+};
+
+type QuotationOffer = {
+  id: number;
+  quotation_request_id: number;
+  workshop_id: number;
+  workshop_name: string | null;
+  price: number | null;
+  service_description: string | null;
+  spare_parts?: string | null;
+  labor_detail?: string | null;
+  labor_cost?: number | null;
+  spare_parts_cost?: number | null;
+  estimated_service_time: string | null;
+  estimated_arrival_time: string | null;
+  warranty: string | null;
+  validity_days: number | null;
+  observations: string | null;
+  condiciones_servicio?: string | null;
+  status: string;
+  created_at: string;
+  expires_at: string | null;
+  emergency_id?: number | null;
+  request_status?: string | null;
+  client_name?: string | null;
+};
+
+type QuotationOfferFormModel = {
+  price: number | null;
+  service_description: string;
+  spare_parts: string;
+  labor_detail: string;
+  labor_cost: number | null;
+  spare_parts_cost: number | null;
+  estimated_service_time: string;
+  estimated_arrival_time: string;
+  warranty: string;
+  validity_days: number | null;
+  observations: string;
+  condiciones_servicio: string;
+};
+
+type ContractedService = {
+  id: number;
+  quotation_request_id: number;
+  workshop_id: number;
+  price: number | null;
+  service_description: string | null;
+  spare_parts: string | null;
+  labor_detail: string | null;
+  labor_cost: number | null;
+  spare_parts_cost: number | null;
+  estimated_service_time: string | null;
+  estimated_arrival_time: string | null;
+  warranty: string | null;
+  validity_days: number | null;
+  observations: string | null;
+  condiciones_servicio: string | null;
+  status: string;
+  offer_created_at: string | null;
+  offer_expires_at: string | null;
+  emergency_id: number | null;
+  client_id: number | null;
+  requested_at: string | null;
+  request_expires_at: string | null;
+  vehicle_name: string | null;
+  vehicle_plate: string | null;
+  problem_type: string | null;
+  address: string | null;
+  zone: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  emergency_description: string | null;
+  emergency_status: string | null;
+  emergency_created_at: string | null;
+  hora_llegada: string | null;
+  latitud_llegada: number | null;
+  longitud_llegada: number | null;
+  client_name: string | null;
+  client_phone: string | null;
+  workshop_name?: string | null;
 };
 
 @Component({
@@ -393,7 +688,7 @@ type WorkshopFormModel = {
               (click)="selectSection('workshops')"
             >
               <span class="dashboard-menu-icon">◫</span>
-              <span>Taller</span>
+              <span>{{ isGlobalAdminSession ? 'Empresas' : 'Taller' }}</span>
               <span class="dashboard-menu-badge">Live</span>
             </button>
 
@@ -405,7 +700,7 @@ type WorkshopFormModel = {
                 (click)="selectSection('workshops')"
               >
                 <span class="dashboard-submenu-bullet"></span>
-                <span>Solicitudes</span>
+                <span>{{ isGlobalAdminSession ? 'Solicitudes de Empresas' : 'Solicitudes' }}</span>
                 <strong>{{ workshops.length | number: '2.0-0' }}</strong>
               </button>
             </div>
@@ -562,12 +857,101 @@ type WorkshopFormModel = {
               </button>
             </div>
           </div>
+
+          <div class="dashboard-menu-group" *ngIf="canAccessSection('quotation_requests')">
+            <button
+              class="dashboard-menu-link"
+              type="button"
+              [class.is-active]="selectedSection === 'quotation_requests' || selectedSection === 'quotation_history'"
+              (click)="selectSection('quotation_requests')"
+            >
+              <span class="dashboard-menu-icon">📋</span>
+              <span>Cotizaciones</span>
+              <span class="dashboard-menu-badge" *ngIf="quotationRequestsBadgeCount > 0">{{ quotationRequestsBadgeCount }}</span>
+            </button>
+
+            <div class="dashboard-submenu">
+              <button
+                class="dashboard-submenu-item"
+                type="button"
+                [class.is-active]="selectedSection === 'quotation_requests'"
+                (click)="selectSection('quotation_requests')"
+              >
+                <span class="dashboard-submenu-bullet"></span>
+                <span>Solicitudes recibidas</span>
+                <strong *ngIf="quotationRequestsBadgeCount > 0">{{ quotationRequestsBadgeCount }}</strong>
+              </button>
+
+              <button
+                class="dashboard-submenu-item"
+                type="button"
+                [class.is-active]="selectedSection === 'quotation_history'"
+                (click)="selectSection('quotation_history')"
+              >
+                <span class="dashboard-submenu-bullet"></span>
+                <span>Mis cotizaciones</span>
+                <strong *ngIf="quotationActiveOffersCount > 0">{{ quotationActiveOffersCount }}</strong>
+              </button>
+
+              <button
+                class="dashboard-submenu-item"
+                type="button"
+                [class.is-active]="selectedSection === 'contracted_services'"
+                (click)="selectSection('contracted_services')"
+              >
+                <span class="dashboard-submenu-bullet"></span>
+                <span>Servicios contratados</span>
+                <strong *ngIf="contractedServices.length > 0">{{ contractedServices.length }}</strong>
+              </button>
+            </div>
+          </div>
+
+          <button
+            class="dashboard-menu-link"
+            type="button"
+            *ngIf="!isWorkshopSession && !isTenantSession"
+            [class.is-active]="selectedSection === 'tenants'"
+            (click)="selectSection('tenants')"
+          >
+            <span class="dashboard-menu-icon">🏢</span>
+            <span>Organizaciones</span>
+            <span class="dashboard-menu-badge" *ngIf="tenants.length > 0">{{ tenants.length }}</span>
+          </button>
+
+          <!-- ── SECCIONES EXCLUSIVAS PARA USUARIOS TENANT ────────────── -->
+          <div class="dashboard-menu-group" *ngIf="canAccessSection('sucursales')">
+            <button
+              class="dashboard-menu-link"
+              type="button"
+              [class.is-active]="selectedSection === 'sucursales'"
+              (click)="selectSection('sucursales')"
+            >
+              <span class="dashboard-menu-icon">📍</span>
+              <span>Mis Sucursales</span>
+              <span class="dashboard-menu-badge" *ngIf="sucursales.length > 0">{{ sucursales.length }}</span>
+            </button>
+          </div>
+
+          <div class="dashboard-menu-group" *ngIf="canAccessSection('usuarios_empresa')">
+            <button
+              class="dashboard-menu-link"
+              type="button"
+              [class.is-active]="selectedSection === 'usuarios_empresa'"
+              (click)="selectSection('usuarios_empresa')"
+            >
+              <span class="dashboard-menu-icon">👥</span>
+              <span>Usuarios</span>
+              <span class="dashboard-menu-badge" *ngIf="usuariosEmpresa.length > 0">{{ usuariosEmpresa.length }}</span>
+            </button>
+          </div>
         </nav>
 
         <section class="dashboard-sidebar-card">
           <span>Turno activo</span>
-          <strong>Administración general</strong>
-          <p>Supervisión de afiliaciones, validación de talleres y control del panel comercial.</p>
+          <strong *ngIf="!isTenantSession">Administración general</strong>
+          <strong *ngIf="isTenantSession">{{ tenantDisplayName }}</strong>
+          <p *ngIf="!isTenantSession">Supervisión de afiliaciones, validación de talleres y control del panel comercial.</p>
+          <p *ngIf="isTenantSession">Panel de tu empresa. Solo ves los datos de tu organización.</p>
         </section>
       </aside>
 
@@ -639,8 +1023,8 @@ type WorkshopFormModel = {
           <article class="dashboard-panel dashboard-panel-accent" *ngIf="selectedSection === 'dashboard'">
             <div class="dashboard-panel-head">
               <div>
-                <p class="dashboard-panel-kicker">{{ isWorkshopSession ? 'Tenant operativo' : 'Control multitenant' }}</p>
-                <h2>{{ isWorkshopSession ? 'Operación del Taller' : 'Vista Global del Sistema' }}</h2>
+                <p class="dashboard-panel-kicker">{{ overviewHeroKicker }}</p>
+                <h2>{{ overviewHeroTitle }}</h2>
               </div>
               <span class="dashboard-toolbar-note" *ngIf="operationalOverview">
                 Actualizado {{ operationalOverview.generated_at | date: 'shortTime' }}
@@ -667,8 +1051,8 @@ type WorkshopFormModel = {
           <article class="dashboard-panel" *ngIf="selectedSection === 'dashboard'">
             <div class="dashboard-panel-head">
               <div>
-                <p class="dashboard-panel-kicker">Estados del proceso</p>
-                <h2>{{ isWorkshopSession ? 'Pipeline del Taller' : 'Distribución Global' }}</h2>
+                <p class="dashboard-panel-kicker">{{ statusPanelKicker }}</p>
+                <h2>{{ statusPanelTitle }}</h2>
               </div>
             </div>
 
@@ -676,7 +1060,7 @@ type WorkshopFormModel = {
               <article class="operational-breakdown-item" *ngFor="let item of operationalOverview?.status_breakdown">
                 <div>
                   <strong>{{ item.label }}</strong>
-                  <p>{{ item.count }} solicitudes registradas en este estado.</p>
+                  <p>{{ statusPanelItemDetail(item.count) }}</p>
                 </div>
                 <span class="maintenance-request-status" [attr.data-status]="statusFilterGroup(item.status)">
                   {{ item.count }}
@@ -684,11 +1068,11 @@ type WorkshopFormModel = {
               </article>
             </div>
             <ng-template #noStatusBreakdown>
-              <p class="dashboard-empty">Todavía no hay estados operativos para mostrar.</p>
+              <p class="dashboard-empty">{{ statusPanelEmptyMessage }}</p>
             </ng-template>
           </article>
 
-          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'dashboard' && !isWorkshopSession">
+          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'dashboard' && showComparativeOperationalPanels">
             <div class="dashboard-panel-head">
               <div>
                 <p class="dashboard-panel-kicker">Rendimiento por tenant</p>
@@ -713,7 +1097,7 @@ type WorkshopFormModel = {
             </ng-template>
           </article>
 
-          <article class="dashboard-panel" *ngIf="selectedSection === 'dashboard' && !isWorkshopSession">
+          <article class="dashboard-panel" *ngIf="selectedSection === 'dashboard' && showComparativeOperationalPanels">
             <div class="dashboard-panel-head">
               <div>
                 <p class="dashboard-panel-kicker">Cobertura operativa</p>
@@ -732,6 +1116,53 @@ type WorkshopFormModel = {
             </div>
             <ng-template #noZones>
               <p class="dashboard-empty">Todavía no hay zonas con carga operativa para mostrar.</p>
+            </ng-template>
+          </article>
+
+          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'dashboard' && showOperationalAnalyticsPanel">
+            <div class="dashboard-panel-head">
+              <div>
+                <p class="dashboard-panel-kicker">Analítica operacional</p>
+                <h2>KPIs del Enunciado</h2>
+              </div>
+            </div>
+
+            <div class="operational-summary-grid" *ngIf="operationalOverview?.analytics_summary?.length">
+              <article class="operational-summary-item" *ngFor="let item of operationalOverview?.analytics_summary">
+                <span>{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+                <p>{{ item.detail }}</p>
+              </article>
+            </div>
+
+            <div class="dashboard-mini-list" *ngIf="operationalOverview?.incident_type_breakdown?.length; else noIncidentTypeBreakdown">
+              <article class="dashboard-mini-item" *ngFor="let item of operationalOverview?.incident_type_breakdown">
+                <div>
+                  <strong>{{ item.label }}</strong>
+                  <p>Incidentes reales clasificados dentro del scope actual.</p>
+                </div>
+                <span>{{ item.count }}</span>
+              </article>
+            </div>
+            <ng-template #noIncidentTypeBreakdown>
+              <p class="dashboard-empty">Todavía no hay incidentes tipificados suficientes para mostrar.</p>
+            </ng-template>
+
+            <div class="operational-ranking-list" *ngIf="operationalOverview?.efficiency_ranking?.length; else noEfficiencyRanking">
+              <article class="operational-ranking-item" *ngFor="let item of operationalOverview?.efficiency_ranking">
+                <div>
+                  <strong>{{ item.workshop_name }}</strong>
+                  <p>
+                    Asignación: {{ formatAnalyticsMinutes(item.avg_assignment_minutes) }} ·
+                    Llegada: {{ formatAnalyticsMinutes(item.avg_arrival_minutes) }} ·
+                    SLA: {{ formatAnalyticsPercent(item.sla_compliance_percent) }}
+                  </p>
+                </div>
+                <span>{{ item.completed_services }} finalizados</span>
+              </article>
+            </div>
+            <ng-template #noEfficiencyRanking>
+              <p class="dashboard-empty">Todavía no hay suficiente historial para medir eficiencia por taller.</p>
             </ng-template>
           </article>
 
@@ -757,11 +1188,11 @@ type WorkshopFormModel = {
             </ng-template>
           </article>
 
-          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'dashboard'">
+          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'dashboard' && showRecentOperationalPanel">
             <div class="dashboard-panel-head">
               <div>
                 <p class="dashboard-panel-kicker">Seguimiento operativo</p>
-                <h2>{{ isWorkshopSession ? 'Solicitudes Recientes del Taller' : 'Últimas Emergencias del Sistema' }}</h2>
+                <h2>{{ recentPanelTitle }}</h2>
               </div>
             </div>
 
@@ -800,7 +1231,10 @@ type WorkshopFormModel = {
             </div>
 
             <p class="dashboard-loading" *ngIf="isEmergenciesLoading">Cargando solicitudes de emergencia...</p>
-            <p class="dashboard-empty" *ngIf="!isEmergenciesLoading && !maintenanceRequests.length">
+            <p class="dashboard-empty" *ngIf="!isEmergenciesLoading && emergenciesFeedback">
+              {{ emergenciesFeedback }}
+            </p>
+            <p class="dashboard-empty" *ngIf="!isEmergenciesLoading && !emergenciesFeedback && !maintenanceRequests.length">
               {{ isWorkshopSession ? 'No hay emergencias pendientes asignadas a este taller.' : 'Aún no hay solicitudes de emergencia registradas.' }}
             </p>
 
@@ -995,7 +1429,7 @@ type WorkshopFormModel = {
 
             <section class="report-summary-grid">
               <article class="report-summary-item">
-                <span>Socio / taller</span>
+                <span>Empresa / Taller</span>
                 <strong>{{ reportWorkshopName }}</strong>
               </article>
               <article class="report-summary-item">
@@ -1492,11 +1926,1064 @@ type WorkshopFormModel = {
           </article>
           <!-- ===== FIN SECCIÓN SINCRONIZACIÓN ===== -->
 
-          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'workshops'">
+          <!-- ===== SECCIÓN COTIZACIONES — SOLICITUDES RECIBIDAS ===== -->
+          <article class="dashboard-panel dashboard-panel-wide cot-panel" *ngIf="selectedSection === 'quotation_requests'">
+
+            <!-- ── VISTA: lista ─────────────────────────────────────────────── -->
+            <ng-container *ngIf="quotationView === 'list'">
+              <div class="dashboard-panel-head">
+                <div>
+                  <p class="dashboard-panel-kicker">Solicitudes de cotización</p>
+                  <h2>{{ isTenantQuotationSession ? 'Cotizaciones del tenant' : 'Solicitudes recibidas' }}</h2>
+                </div>
+                <div class="dashboard-toolbar">
+                  <span class="dashboard-toolbar-note">{{ quotationRequests.length }} solicitudes</span>
+                  <button class="dashboard-refresh-button" type="button" (click)="loadQuotationRequests()">Actualizar</button>
+                </div>
+              </div>
+
+              <div *ngIf="isQuotationRequestsLoading" class="dashboard-loading-state">Cargando solicitudes...</div>
+
+              <div *ngIf="!isQuotationRequestsLoading && quotationRequests.length === 0" class="dashboard-empty-state">
+                {{ isTenantQuotationSession ? 'No hay solicitudes de cotización registradas.' : 'No hay solicitudes de cotización recibidas.' }}
+              </div>
+
+              <table *ngIf="!isQuotationRequestsLoading && quotationRequests.length > 0" class="dashboard-table cot-table-clickable">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Emergencia</th>
+                    <th *ngIf="isTenantQuotationSession">Cliente</th>
+                    <th *ngIf="isTenantQuotationSession">Sucursal / taller</th>
+                    <th>Estado</th>
+                    <th>Propuestas</th>
+                    <th *ngIf="!isTenantQuotationSession">Invitación</th>
+                    <th *ngIf="isTenantQuotationSession">Propuesta aceptada</th>
+                    <th>Recibido</th>
+                    <th>Fecha</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr *ngFor="let req of quotationRequests" (click)="openQuotationDetail(req)" class="cot-row-clickable">
+                    <td><strong>#{{ req.id }}</strong></td>
+                    <td>{{ req.emergency_id ?? '—' }}</td>
+                    <td *ngIf="isTenantQuotationSession">{{ req.client_name || 'Cliente no identificado' }}</td>
+                    <td *ngIf="isTenantQuotationSession">{{ req.workshop_names || 'Sin taller asociado' }}</td>
+                    <td>
+                      <span class="dashboard-badge"
+                        [class.dashboard-badge-green]="req.status === 'seleccionado'"
+                        [class.dashboard-badge-yellow]="req.status === 'abierto' || req.status === 'con_propuestas' || req.status === 'en_evaluacion'"
+                        [class.dashboard-badge-red]="req.status === 'cancelado' || req.status === 'expirado'">
+                        {{ quotationRequestStateLabel(req) }}
+                      </span>
+                    </td>
+                    <td>{{ req.received_offers_count }} / {{ req.requested_workshops_count }}</td>
+                    <td *ngIf="!isTenantQuotationSession">
+                      <span class="dashboard-badge"
+                        [class.dashboard-badge-yellow]="req.workshop_invitation_status === 'notificado'"
+                        [class.dashboard-badge-green]="req.workshop_invitation_status === 'respondido'">
+                        {{ quotationInvitationStateLabel(req) }}
+                      </span>
+                    </td>
+                    <td *ngIf="isTenantQuotationSession">
+                      <span *ngIf="req.selected_workshop_name; else noAcceptedOffer">
+                        {{ req.selected_workshop_name }}
+                        <ng-container *ngIf="req.selected_offer_price != null"> · Bs. {{ req.selected_offer_price }}</ng-container>
+                      </span>
+                      <ng-template #noAcceptedOffer>—</ng-template>
+                    </td>
+                    <td>{{ req.requested_at | date: 'dd/MM/yy HH:mm' }}</td>
+                    <td>{{ req.created_at | date: 'dd/MM/yy HH:mm' }}</td>
+                    <td><button class="cot-btn-ver" type="button" (click)="$event.stopPropagation(); openQuotationDetail(req)">Ver detalle →</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </ng-container>
+
+            <!-- ── VISTA: detalle ───────────────────────────────────────────── -->
+            <ng-container *ngIf="quotationView === 'detail' && selectedQuotationRequest">
+              <div class="dashboard-panel-head">
+                <div class="cot-head-with-back">
+                  <button class="cot-back-btn" type="button" (click)="resetQuotationView()">← Solicitudes</button>
+                  <div>
+                    <p class="dashboard-panel-kicker">Solicitud #{{ selectedQuotationRequest.id }}</p>
+                    <h2>Detalle de solicitud</h2>
+                  </div>
+                </div>
+                <div class="dashboard-toolbar">
+                  <button
+                    *ngIf="!isTenantQuotationSession"
+                    class="cot-btn-primary"
+                    type="button"
+                    [disabled]="selectedQuotationRequest.status === 'seleccionado' || selectedQuotationRequest.status === 'cancelado' || selectedQuotationRequest.status === 'expirado' || selectedWorkshopOffer?.status === 'aceptada' || selectedWorkshopOffer?.status === 'rechazada' || selectedWorkshopOffer?.status === 'expirado'"
+                    (click)="openQuotationOfferForm()"
+                  >
+                    {{ selectedWorkshopOffer ? 'Editar cotización' : '+ Registrar cotización' }}
+                  </button>
+                </div>
+              </div>
+
+              <!-- Estado de la solicitud -->
+              <div class="cot-detail-status-bar">
+                <span class="dashboard-badge dashboard-badge-lg"
+                  [class.dashboard-badge-green]="selectedQuotationRequest.status === 'seleccionado'"
+                  [class.dashboard-badge-yellow]="selectedQuotationRequest.status === 'abierto' || selectedQuotationRequest.status === 'con_propuestas' || selectedQuotationRequest.status === 'en_evaluacion'"
+                  [class.dashboard-badge-red]="selectedQuotationRequest.status === 'cancelado' || selectedQuotationRequest.status === 'expirado'">
+                  {{ quotationRequestStateLabel(selectedQuotationRequest) }}
+                </span>
+                <span class="cot-status-meta">
+                  {{ selectedQuotationRequest.received_offers_count }} propuesta(s) recibida(s) de {{ selectedQuotationRequest.requested_workshops_count }} taller(es) notificado(s)
+                </span>
+                <span class="cot-status-meta" *ngIf="selectedQuotationRequest.expires_at">
+                  Vence: {{ selectedQuotationRequest.expires_at | date: 'dd/MM/yyyy HH:mm' }}
+                </span>
+                <span class="cot-status-meta" *ngIf="isTenantQuotationSession && selectedQuotationRequest.client_name">
+                  Cliente: {{ selectedQuotationRequest.client_name }}
+                </span>
+              </div>
+
+              <!-- Cargando emergencia -->
+              <div *ngIf="isQuotationEmergencyLoading" class="dashboard-loading-state">Cargando información de la emergencia...</div>
+
+              <!-- Detalle de emergencia -->
+              <div *ngIf="!isQuotationEmergencyLoading && selectedQuotationEmergency" class="cot-detail-grid">
+
+                <!-- Columna izquierda: info del cliente/vehículo/problema -->
+                <div class="cot-detail-col">
+                  <div class="cot-info-card">
+                    <h3 class="cot-info-card-title">Cliente y estado</h3>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Cliente:</span>
+                      <span>{{ selectedQuotationEmergency.client_name || 'Cliente no identificado' }}</span>
+                    </p>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Estado:</span>
+                      <span>{{ selectedQuotationEmergency.emergency_status || '—' }}</span>
+                    </p>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Creada:</span>
+                      <span>{{ selectedQuotationEmergency.created_at | date: 'dd/MM/yyyy HH:mm' }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.nearest_workshop_name">
+                      <span class="cot-info-label">Taller asignado:</span>
+                      <span>{{ selectedQuotationEmergency.nearest_workshop_name }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.assigned_technician_name">
+                      <span class="cot-info-label">Técnico:</span>
+                      <span>{{ selectedQuotationEmergency.assigned_technician_name }}</span>
+                    </p>
+                  </div>
+
+                  <div class="cot-info-card">
+                    <h3 class="cot-info-card-title">Vehículo</h3>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Modelo:</span>
+                      <span>{{ selectedQuotationEmergency.vehicle_name || '—' }}</span>
+                    </p>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Placa:</span>
+                      <span>{{ selectedQuotationEmergency.vehicle_plate || '—' }}</span>
+                    </p>
+                  </div>
+
+                  <div class="cot-info-card">
+                    <h3 class="cot-info-card-title">Problema reportado</h3>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Tipo:</span>
+                      <span>{{ selectedQuotationEmergency.problem_type_standardized || selectedQuotationEmergency.problem_type || '—' }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.description">
+                      <span class="cot-info-label">Descripción:</span>
+                      <span>{{ selectedQuotationEmergency.description }}</span>
+                    </p>
+                  </div>
+
+                  <div class="cot-info-card">
+                    <h3 class="cot-info-card-title">Diagnóstico preliminar e IA</h3>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Diagnóstico principal:</span>
+                      <span>{{ selectedQuotationEmergency.problem_type_standardized || selectedQuotationEmergency.problem_type || '—' }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.photo_problem_type_standardized">
+                      <span class="cot-info-label">Clasificación por foto:</span>
+                      <span>{{ selectedQuotationEmergency.photo_problem_type_standardized }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.photo_classification_confidence != null">
+                      <span class="cot-info-label">Confianza IA:</span>
+                      <span>{{ (selectedQuotationEmergency.photo_classification_confidence * 100) | number: '1.0-0' }}%</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.audio_transcript">
+                      <span class="cot-info-label">Transcripción:</span>
+                      <span>{{ selectedQuotationEmergency.audio_transcript }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.audio_transcript_status">
+                      <span class="cot-info-label">Estado transcripción:</span>
+                      <span>{{ selectedQuotationEmergency.audio_transcript_status }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.photo_classification_error">
+                      <span class="cot-info-label">Observación IA foto:</span>
+                      <span>{{ selectedQuotationEmergency.photo_classification_error }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedQuotationEmergency.audio_transcript_error">
+                      <span class="cot-info-label">Observación IA audio:</span>
+                      <span>{{ selectedQuotationEmergency.audio_transcript_error }}</span>
+                    </p>
+                  </div>
+
+                  <div class="cot-info-card">
+                    <h3 class="cot-info-card-title">Ubicación</h3>
+                    <ng-container *ngIf="quotationEmergencyMapEmbedUrl; else cotNoMap">
+                      <div class="cot-map-wrapper">
+                        <iframe
+                          [src]="quotationEmergencyMapEmbedUrl"
+                          loading="lazy"
+                          referrerpolicy="no-referrer-when-downgrade"
+                          title="Ubicación de la emergencia"
+                        ></iframe>
+                      </div>
+                      <a *ngIf="quotationEmergencyMapExternalUrl" [href]="quotationEmergencyMapExternalUrl" target="_blank" rel="noreferrer" class="cot-map-link">
+                        Abrir en mapa externo
+                      </a>
+                    </ng-container>
+                    <ng-template #cotNoMap>
+                      <p class="cot-empty-note">Sin coordenadas registradas.</p>
+                    </ng-template>
+                  </div>
+                </div>
+
+                <!-- Columna derecha: evidencias -->
+                <div class="cot-detail-col">
+                  <div class="cot-info-card">
+                    <h3 class="cot-info-card-title">Evidencias</h3>
+
+                    <div class="cot-evidence-block">
+                      <p class="cot-evidence-label">Audio</p>
+                      <audio *ngIf="quotationEmergencyAudioUrl; else cotNoAudio" controls [src]="quotationEmergencyAudioUrl" class="cot-audio"></audio>
+                      <ng-template #cotNoAudio><p class="cot-empty-note">Sin audio enviado.</p></ng-template>
+                    </div>
+
+                    <div class="cot-evidence-block">
+                      <p class="cot-evidence-label">Fotos ({{ quotationEmergencyPhotoUrls.length }})</p>
+                      <div *ngIf="quotationEmergencyPhotoUrls.length; else cotNoPhotos" class="cot-photo-strip">
+                        <a
+                          *ngFor="let photoUrl of quotationEmergencyPhotoUrls"
+                          [href]="photoUrl"
+                          target="_blank"
+                          rel="noreferrer"
+                          class="cot-photo-thumb"
+                        >
+                          <img [src]="photoUrl" alt="Evidencia fotográfica" loading="lazy" />
+                        </a>
+                      </div>
+                      <ng-template #cotNoPhotos><p class="cot-empty-note">Sin fotos enviadas.</p></ng-template>
+                    </div>
+                  </div>
+
+                  <div class="cot-info-card" *ngIf="selectedWorkshopOffer">
+                    <h3 class="cot-info-card-title">Mi cotización</h3>
+                    <p class="cot-info-line">
+                      <span class="cot-info-label">Estado:</span>
+                      <span>{{ quotationOfferStateLabel(selectedWorkshopOffer) }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedWorkshopOffer.price != null">
+                      <span class="cot-info-label">Precio:</span>
+                      <span>Bs. {{ selectedWorkshopOffer.price }}</span>
+                    </p>
+                    <p class="cot-info-line" *ngIf="selectedWorkshopOffer.expires_at">
+                      <span class="cot-info-label">Vence:</span>
+                      <span>{{ selectedWorkshopOffer.expires_at | date: 'dd/MM/yyyy HH:mm' }}</span>
+                    </p>
+                  </div>
+
+                  <div class="cot-info-card" *ngIf="isTenantQuotationSession">
+                    <h3 class="cot-info-card-title">Propuestas del tenant</h3>
+                    <div *ngIf="selectedQuotationOffers.length === 0" class="cot-empty-note">
+                      No hay propuestas registradas para esta solicitud.
+                    </div>
+                    <div *ngIf="selectedQuotationOffers.length > 0" class="cot-history-list">
+                      <div class="cot-history-card" *ngFor="let offer of selectedQuotationOffers">
+                        <div class="cot-history-card-head">
+                          <div class="cot-history-card-meta">
+                            <strong class="cot-history-id">{{ offer.workshop_name || ('Taller #' + offer.workshop_id) }}</strong>
+                            <span class="cot-history-sub">Cotización #{{ offer.id }}</span>
+                          </div>
+                          <div class="cot-history-badges">
+                            <span class="dashboard-badge"
+                              [class.dashboard-badge-green]="offer.status === 'aceptada' || offer.status === 'seleccionado'"
+                              [class.dashboard-badge-yellow]="offer.status === 'enviada'"
+                              [class.dashboard-badge-blue]="offer.status === 'actualizada'"
+                              [class.dashboard-badge-red]="offer.status === 'rechazado' || offer.status === 'expirado'">
+                              {{ quotationOfferStateLabel(offer) }}
+                            </span>
+                          </div>
+                        </div>
+                        <div class="cot-history-card-body">
+                          <div class="cot-history-row">
+                            <span class="cot-history-label">Precio</span>
+                            <span class="cot-history-value cot-price-highlight">{{ offer.price != null ? 'Bs. ' + offer.price : '—' }}</span>
+                          </div>
+                          <div class="cot-history-row" *ngIf="offer.service_description">
+                            <span class="cot-history-label">Servicio</span>
+                            <span class="cot-history-value">{{ offer.service_description }}</span>
+                          </div>
+                          <div class="cot-history-row" *ngIf="offer.estimated_arrival_time">
+                            <span class="cot-history-label">ETA llegada</span>
+                            <span class="cot-history-value">{{ offer.estimated_arrival_time }}</span>
+                          </div>
+                          <div class="cot-history-row" *ngIf="offer.estimated_service_time">
+                            <span class="cot-history-label">Tiempo reparación</span>
+                            <span class="cot-history-value">{{ offer.estimated_service_time }}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Sin emergencia asociada -->
+              <div *ngIf="!isQuotationEmergencyLoading && !selectedQuotationEmergency && selectedQuotationRequest.emergency_id" class="dashboard-empty-state">
+                No se pudo cargar la información de la emergencia.
+              </div>
+
+              <div *ngIf="!selectedQuotationRequest.emergency_id" class="dashboard-empty-state">
+                Esta solicitud no tiene emergencia asociada.
+              </div>
+            </ng-container>
+
+            <!-- ── VISTA: formulario de cotización ─────────────────────────── -->
+            <ng-container *ngIf="quotationView === 'offer_form' && selectedQuotationRequest">
+              <div class="dashboard-panel-head">
+                <div class="cot-head-with-back">
+                  <button class="cot-back-btn" type="button" (click)="quotationView = 'detail'">← Detalle</button>
+                  <div>
+                    <p class="dashboard-panel-kicker">Solicitud #{{ selectedQuotationRequest.id }}</p>
+                    <h2>{{ selectedWorkshopOffer ? 'Actualizar cotización' : 'Registrar cotización' }}</h2>
+                  </div>
+                </div>
+              </div>
+
+              <form class="cot-form" (ngSubmit)="submitQuotationOffer()" #cotForm="ngForm">
+                <div class="cot-form-grid">
+
+                  <div class="cot-form-field cot-field-full">
+                    <label class="cot-form-label" for="cot-price">Precio (Bs.) <span class="cot-required">*</span></label>
+                    <input
+                      id="cot-price"
+                      class="cot-form-input"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="Ej. 350.00"
+                      [(ngModel)]="quotationOfferForm.price"
+                      name="cot_price"
+                      required
+                    />
+                  </div>
+
+                  <div class="cot-form-field cot-field-full">
+                    <label class="cot-form-label" for="cot-desc">Descripción del servicio <span class="cot-required">*</span></label>
+                    <textarea
+                      id="cot-desc"
+                      class="cot-form-textarea"
+                      rows="4"
+                      placeholder="Describe el trabajo a realizar, repuestos incluidos, procedimiento, etc."
+                      [(ngModel)]="quotationOfferForm.service_description"
+                      name="cot_desc"
+                      required
+                      minlength="3"
+                    ></textarea>
+                  </div>
+
+                  <div class="cot-form-field cot-field-full">
+                    <label class="cot-form-label" for="cot-spare-parts">Repuestos necesarios</label>
+                    <textarea
+                      id="cot-spare-parts"
+                      class="cot-form-textarea"
+                      rows="3"
+                      placeholder="Ej. Batería 12V 75Ah, borne positivo, fusible principal..."
+                      [(ngModel)]="quotationOfferForm.spare_parts"
+                      name="cot_spare_parts"
+                    ></textarea>
+                  </div>
+
+                  <div class="cot-form-field cot-field-full">
+                    <label class="cot-form-label" for="cot-labor-detail">Detalle de mano de obra</label>
+                    <textarea
+                      id="cot-labor-detail"
+                      class="cot-form-textarea"
+                      rows="3"
+                      placeholder="Ej. Diagnóstico eléctrico, desmontaje, instalación y prueba de carga."
+                      [(ngModel)]="quotationOfferForm.labor_detail"
+                      name="cot_labor_detail"
+                    ></textarea>
+                  </div>
+
+                  <div class="cot-form-field">
+                    <label class="cot-form-label" for="cot-labor-cost">Costo mano de obra (Bs.)</label>
+                    <input
+                      id="cot-labor-cost"
+                      class="cot-form-input"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="80.00"
+                      [(ngModel)]="quotationOfferForm.labor_cost"
+                      name="cot_labor_cost"
+                    />
+                  </div>
+
+                  <div class="cot-form-field">
+                    <label class="cot-form-label" for="cot-parts-cost">Costo repuestos (Bs.)</label>
+                    <input
+                      id="cot-parts-cost"
+                      class="cot-form-input"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="450.00"
+                      [(ngModel)]="quotationOfferForm.spare_parts_cost"
+                      name="cot_spare_parts_cost"
+                    />
+                  </div>
+
+                  <div class="cot-form-field">
+                    <label class="cot-form-label" for="cot-service-time">Tiempo estimado de reparación</label>
+                    <input
+                      id="cot-service-time"
+                      class="cot-form-input"
+                      type="text"
+                      placeholder="Ej. 2 horas, 1 día"
+                      [(ngModel)]="quotationOfferForm.estimated_service_time"
+                      name="cot_service_time"
+                    />
+                  </div>
+
+                  <div class="cot-form-field">
+                    <label class="cot-form-label" for="cot-eta">ETA de llegada</label>
+                    <input
+                      id="cot-eta"
+                      class="cot-form-input"
+                      type="text"
+                      placeholder="Ej. 30 minutos, 1 hora"
+                      [(ngModel)]="quotationOfferForm.estimated_arrival_time"
+                      name="cot_eta"
+                    />
+                  </div>
+
+                  <div class="cot-form-field">
+                    <label class="cot-form-label" for="cot-warranty">Garantía</label>
+                    <input
+                      id="cot-warranty"
+                      class="cot-form-input"
+                      type="text"
+                      placeholder="Ej. 3 meses en mano de obra"
+                      [(ngModel)]="quotationOfferForm.warranty"
+                      name="cot_warranty"
+                    />
+                  </div>
+
+                  <div class="cot-form-field">
+                    <label class="cot-form-label" for="cot-validity">
+                      Vigencia de la cotización (días)
+                      <span class="cot-field-hint">máx. {{ maxValidityDays }} día(s)</span>
+                    </label>
+                    <input
+                      id="cot-validity"
+                      class="cot-form-input"
+                      type="number"
+                      min="1"
+                      [max]="maxValidityDays"
+                      [placeholder]="maxValidityDays >= 3 ? '3' : '1'"
+                      [(ngModel)]="quotationOfferForm.validity_days"
+                      name="cot_validity"
+                    />
+                  </div>
+
+                  <div class="cot-form-field cot-field-full">
+                    <label class="cot-form-label" for="cot-obs">Observaciones</label>
+                    <textarea
+                      id="cot-obs"
+                      class="cot-form-textarea"
+                      rows="3"
+                      placeholder="Condiciones adicionales, exclusiones, notas para el cliente..."
+                      [(ngModel)]="quotationOfferForm.observations"
+                      name="cot_obs"
+                    ></textarea>
+                  </div>
+
+                  <div class="cot-form-field cot-field-full">
+                    <label class="cot-form-label" for="cot-conditions">Condiciones del servicio</label>
+                    <textarea
+                      id="cot-conditions"
+                      class="cot-form-textarea"
+                      rows="3"
+                      placeholder="Ej. El servicio incluye traslado hasta el taller. No incluye piezas de origen no original."
+                      [(ngModel)]="quotationOfferForm.condiciones_servicio"
+                      name="cot_conditions"
+                    ></textarea>
+                  </div>
+                </div>
+
+                <div *ngIf="quotationOfferFeedback" class="cot-form-feedback cot-form-feedback-error">
+                  {{ quotationOfferFeedback }}
+                </div>
+
+                <div class="cot-form-actions">
+                  <button class="cot-back-btn" type="button" (click)="quotationView = 'detail'" [disabled]="isSubmittingOffer">
+                    Cancelar
+                  </button>
+                  <button class="cot-btn-submit" type="submit" [disabled]="isSubmittingOffer">
+                    <span *ngIf="!isSubmittingOffer">{{ selectedWorkshopOffer ? 'Actualizar cotización' : 'Enviar cotización' }}</span>
+                    <span *ngIf="isSubmittingOffer">Enviando...</span>
+                  </button>
+                </div>
+              </form>
+            </ng-container>
+
+            <!-- ── VISTA: confirmación ─────────────────────────────────────── -->
+            <ng-container *ngIf="quotationView === 'confirmation' && lastSubmittedOffer">
+              <div class="cot-confirmation">
+                <div class="cot-confirmation-icon">✓</div>
+                <h2 class="cot-confirmation-title">{{ lastSubmittedOffer.status === 'actualizada' ? 'Cotización actualizada exitosamente' : 'Cotización enviada exitosamente' }}</h2>
+                <p class="cot-confirmation-sub">Tu propuesta fue registrada para la solicitud #{{ lastSubmittedOffer.quotation_request_id }}.</p>
+
+                <div class="cot-confirmation-summary">
+                  <div class="cot-summary-row">
+                    <span class="cot-summary-label">Precio:</span>
+                    <span class="cot-summary-value">Bs. {{ lastSubmittedOffer.price }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.service_description">
+                    <span class="cot-summary-label">Servicio:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.service_description }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.spare_parts">
+                    <span class="cot-summary-label">Repuestos:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.spare_parts }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.labor_detail">
+                    <span class="cot-summary-label">Mano de obra:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.labor_detail }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.labor_cost != null">
+                    <span class="cot-summary-label">Costo mano de obra:</span>
+                    <span class="cot-summary-value">Bs. {{ lastSubmittedOffer.labor_cost }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.spare_parts_cost != null">
+                    <span class="cot-summary-label">Costo repuestos:</span>
+                    <span class="cot-summary-value">Bs. {{ lastSubmittedOffer.spare_parts_cost }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.estimated_service_time">
+                    <span class="cot-summary-label">Tiempo reparación:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.estimated_service_time }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.estimated_arrival_time">
+                    <span class="cot-summary-label">ETA llegada:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.estimated_arrival_time }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.warranty">
+                    <span class="cot-summary-label">Garantía:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.warranty }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.validity_days">
+                    <span class="cot-summary-label">Vigencia:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.validity_days }} días</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.observations">
+                    <span class="cot-summary-label">Observaciones:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.observations }}</span>
+                  </div>
+                  <div class="cot-summary-row" *ngIf="lastSubmittedOffer.condiciones_servicio">
+                    <span class="cot-summary-label">Condiciones:</span>
+                    <span class="cot-summary-value">{{ lastSubmittedOffer.condiciones_servicio }}</span>
+                  </div>
+                </div>
+
+                <div class="cot-confirmation-actions">
+                  <button class="cot-btn-primary" type="button" (click)="resetQuotationView()">
+                    Ver todas las solicitudes
+                  </button>
+                </div>
+              </div>
+            </ng-container>
+
+          </article>
+          <!-- ===== FIN SECCIÓN SOLICITUDES RECIBIDAS ===== -->
+
+          <!-- ===== SECCIÓN COTIZACIONES — HISTORIAL ===== -->
+          <article class="dashboard-panel dashboard-panel-wide cot-panel" *ngIf="selectedSection === 'quotation_history'">
             <div class="dashboard-panel-head">
               <div>
-                <p class="dashboard-panel-kicker">Registros recibidos</p>
-                <h2>Registra tu taller mecánico</h2>
+                <p class="dashboard-panel-kicker">Historial de propuestas</p>
+                <h2>{{ isTenantQuotationSession ? 'Propuestas del tenant' : 'Mis cotizaciones' }}</h2>
+              </div>
+              <div class="dashboard-toolbar">
+                <span class="dashboard-toolbar-note">{{ quotationOffers.length }} propuesta(s)</span>
+                <button class="dashboard-refresh-button" type="button" (click)="loadQuotationHistory()">Actualizar</button>
+              </div>
+            </div>
+
+            <div *ngIf="isQuotationHistoryLoading" class="dashboard-loading-state">Cargando historial...</div>
+
+            <div *ngIf="!isQuotationHistoryLoading && quotationOffers.length === 0" class="dashboard-empty-state">
+              No hay cotizaciones registradas aún.
+            </div>
+
+            <div *ngIf="!isQuotationHistoryLoading && quotationOffers.length > 0" class="cot-history-list">
+              <div class="cot-history-card" *ngFor="let offer of quotationOffers">
+                <div class="cot-history-card-head">
+                  <div class="cot-history-card-meta">
+                    <strong class="cot-history-id">Cotización #{{ offer.id }}</strong>
+                    <span class="cot-history-sub">Solicitud #{{ offer.quotation_request_id }}
+                      <ng-container *ngIf="offer.emergency_id"> · Emergencia #{{ offer.emergency_id }}</ng-container>
+                    </span>
+                  </div>
+                  <div class="cot-history-badges">
+                    <span class="dashboard-badge"
+                      [class.dashboard-badge-green]="offer.status === 'aceptada' || offer.status === 'seleccionado'"
+                      [class.dashboard-badge-yellow]="offer.status === 'enviada'"
+                      [class.dashboard-badge-blue]="offer.status === 'actualizada'"
+                      [class.dashboard-badge-red]="offer.status === 'rechazado' || offer.status === 'expirado'">
+                      {{ quotationOfferStateLabel(offer) }}
+                    </span>
+                    <span *ngIf="offer.request_status" class="dashboard-badge"
+                      [class.dashboard-badge-green]="offer.request_status === 'seleccionado'"
+                      [class.dashboard-badge-yellow]="offer.request_status === 'abierto' || offer.request_status === 'con_propuestas'"
+                      [class.dashboard-badge-red]="offer.request_status === 'cancelado' || offer.request_status === 'expirado'">
+                      Solicitud: {{ offer.request_status }}
+                    </span>
+                  </div>
+                </div>
+
+                <div class="cot-history-card-body">
+                  <div class="cot-history-row" *ngIf="isTenantQuotationSession">
+                    <span class="cot-history-label">Taller</span>
+                    <span class="cot-history-value">{{ offer.workshop_name || '—' }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="isTenantQuotationSession">
+                    <span class="cot-history-label">Cliente</span>
+                    <span class="cot-history-value">{{ offer.client_name || '—' }}</span>
+                  </div>
+                  <div class="cot-history-row">
+                    <span class="cot-history-label">Precio</span>
+                    <span class="cot-history-value cot-price-highlight">{{ offer.price != null ? 'Bs. ' + offer.price : '—' }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.service_description">
+                    <span class="cot-history-label">Servicio</span>
+                    <span class="cot-history-value">{{ offer.service_description }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.spare_parts">
+                    <span class="cot-history-label">Repuestos</span>
+                    <span class="cot-history-value">{{ offer.spare_parts }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.labor_detail">
+                    <span class="cot-history-label">Mano de obra</span>
+                    <span class="cot-history-value">{{ offer.labor_detail }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.labor_cost != null">
+                    <span class="cot-history-label">Costo mano de obra</span>
+                    <span class="cot-history-value">{{ 'Bs. ' + offer.labor_cost }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.spare_parts_cost != null">
+                    <span class="cot-history-label">Costo repuestos</span>
+                    <span class="cot-history-value">{{ 'Bs. ' + offer.spare_parts_cost }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.estimated_service_time">
+                    <span class="cot-history-label">Tiempo reparación</span>
+                    <span class="cot-history-value">{{ offer.estimated_service_time }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.estimated_arrival_time">
+                    <span class="cot-history-label">ETA llegada</span>
+                    <span class="cot-history-value">{{ offer.estimated_arrival_time }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.warranty">
+                    <span class="cot-history-label">Garantía</span>
+                    <span class="cot-history-value">{{ offer.warranty }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.validity_days">
+                    <span class="cot-history-label">Vigencia</span>
+                    <span class="cot-history-value">{{ offer.validity_days }} días</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.observations">
+                    <span class="cot-history-label">Observaciones</span>
+                    <span class="cot-history-value">{{ offer.observations }}</span>
+                  </div>
+                  <div class="cot-history-row" *ngIf="offer.condiciones_servicio">
+                    <span class="cot-history-label">Condiciones</span>
+                    <span class="cot-history-value">{{ offer.condiciones_servicio }}</span>
+                  </div>
+                </div>
+
+                <!-- Banner resultado selección -->
+                <div class="cot-result-banner cot-result-aceptada" *ngIf="offer.status === 'aceptada'">
+                  <span class="cot-result-icon">✅</span>
+                  <div>
+                    <strong>¡Tu cotización fue aceptada!</strong>
+                    <p>El cliente seleccionó tu propuesta. Ve a <a class="cot-banner-link" (click)="selectSection('contracted_services')">Servicios contratados</a> para gestionar la atención.</p>
+                  </div>
+                </div>
+
+                <div class="cot-result-banner cot-result-rechazada" *ngIf="offer.status === 'rechazada'">
+                  <span class="cot-result-icon">❌</span>
+                  <div>
+                    <strong>Cotización no seleccionada</strong>
+                    <p>El cliente seleccionó otra propuesta (NO_SELECCIONADA). Esta cotización queda bloqueada.</p>
+                  </div>
+                </div>
+
+                <div class="cot-result-banner cot-result-expirada" *ngIf="offer.status === 'expirado'">
+                  <span class="cot-result-icon">⏰</span>
+                  <div>
+                    <strong>Cotización vencida</strong>
+                    <p>La vigencia de esta cotización expiró sin ser seleccionada.</p>
+                  </div>
+                </div>
+
+                <div class="cot-history-card-foot">
+                  <span>Enviada: {{ offer.created_at | date: 'dd/MM/yyyy HH:mm' }}</span>
+                  <span *ngIf="offer.expires_at">Vence: {{ offer.expires_at | date: 'dd/MM/yyyy HH:mm' }}</span>
+                  <button *ngIf="offer.status === 'aceptada'" class="cot-btn-sm cot-btn-success" type="button" (click)="selectSection('contracted_services')">
+                    Ver servicio contratado →
+                  </button>
+                </div>
+              </div>
+            </div>
+          </article>
+          <!-- ===== FIN SECCIÓN HISTORIAL ===== -->
+
+          <!-- ===== SECCIÓN SERVICIOS CONTRATADOS (CU10-B) ===== -->
+          <article class="dashboard-panel dashboard-panel-wide cot-panel" *ngIf="selectedSection === 'contracted_services'">
+            <div class="dashboard-panel-head">
+              <div>
+                <p class="dashboard-panel-kicker">Cotizaciones aceptadas</p>
+                <h2>{{ isTenantQuotationSession ? 'Servicios contratados del tenant' : 'Servicios contratados' }}</h2>
+              </div>
+              <div class="dashboard-toolbar">
+                <span class="dashboard-toolbar-note">{{ contractedServices.length }} servicio(s)</span>
+                <button class="dashboard-refresh-button" type="button" (click)="loadContractedServices()">Actualizar</button>
+              </div>
+            </div>
+
+            <div *ngIf="isContractedServicesLoading" class="dashboard-loading-state">Cargando servicios contratados...</div>
+
+            <!-- ── Vista lista ─────────────────────────────────────────────── -->
+            <ng-container *ngIf="!isContractedServicesLoading && contractedServicesView === 'list'">
+
+              <div *ngIf="contractedServices.length === 0" class="dashboard-empty-state">
+                No hay servicios contratados aún. Cuando un cliente acepte tu cotización aparecerá aquí.
+              </div>
+
+              <div *ngIf="contractedServices.length > 0" class="svc-table-wrapper">
+                <table class="svc-table">
+                  <thead>
+                    <tr>
+                      <th>Código</th>
+                      <th *ngIf="isTenantQuotationSession">Taller</th>
+                      <th>Cliente</th>
+                      <th>Vehículo</th>
+                      <th>Tipo emergencia</th>
+                      <th>Estado emergencia</th>
+                      <th>Monto</th>
+                      <th>Fecha contratación</th>
+                      <th>Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr *ngFor="let svc of contractedServices">
+                      <td>
+                        <span class="svc-code">
+                          COT-{{ svc.id }}
+                          <span class="svc-sub" *ngIf="svc.emergency_id">&nbsp;· EM-{{ svc.emergency_id }}</span>
+                        </span>
+                      </td>
+                      <td *ngIf="isTenantQuotationSession">{{ svc.workshop_name || '—' }}</td>
+                      <td>{{ svc.client_name || '—' }}</td>
+                      <td>
+                        <span *ngIf="svc.vehicle_name || svc.vehicle_plate">
+                          {{ svc.vehicle_name }}
+                          <span class="svc-plate" *ngIf="svc.vehicle_plate">{{ svc.vehicle_plate }}</span>
+                        </span>
+                        <span *ngIf="!svc.vehicle_name && !svc.vehicle_plate">—</span>
+                      </td>
+                      <td>{{ svc.problem_type || '—' }}</td>
+                      <td>
+                        <span class="dashboard-badge"
+                          [class.dashboard-badge-green]="svc.emergency_status === 'servicio_finalizado'"
+                          [class.dashboard-badge-blue]="svc.emergency_status === 'servicio_en_proceso' || svc.emergency_status === 'tecnico_en_sitio' || svc.emergency_status === 'auxilio_en_camino' || svc.emergency_status === 'auxilio_asignado'"
+                          [class.dashboard-badge-yellow]="svc.emergency_status === 'solicitud_recibida' || svc.emergency_status === 'en_revision'"
+                          [class.dashboard-badge-red]="svc.emergency_status === 'rechazado' || svc.emergency_status === 'solicitud_cancelada'">
+                          {{ contractedServiceEmergencyStatusLabel(svc.emergency_status) }}
+                        </span>
+                      </td>
+                      <td class="svc-price">{{ svc.price != null ? 'Bs. ' + svc.price : '—' }}</td>
+                      <td>{{ svc.offer_created_at | date: 'dd/MM/yyyy HH:mm' }}</td>
+                      <td>
+                        <button class="cot-btn-sm" type="button" (click)="openContractedServiceDetail(svc)">Ver detalle</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </ng-container>
+
+            <!-- ── Vista detalle ───────────────────────────────────────────── -->
+            <ng-container *ngIf="!isContractedServicesLoading && contractedServicesView === 'detail' && selectedContractedService">
+              <div class="cot-detail-header">
+                <button class="cot-back-btn" type="button" (click)="closeContractedServiceDetail()">
+                  ← Volver a la lista
+                </button>
+                <h3 class="cot-detail-title">
+                  Servicio contratado COT-{{ selectedContractedService.id }}
+                  <ng-container *ngIf="selectedContractedService.emergency_id">
+                    · Emergencia EM-{{ selectedContractedService.emergency_id }}
+                  </ng-container>
+                </h3>
+              </div>
+
+              <!-- Banner ACEPTADA -->
+              <div class="svc-status-banner svc-banner-aceptada">
+                <span class="svc-banner-icon">✅</span>
+                <div>
+                  <strong>Cotización aceptada por el cliente</strong>
+                  <p>Fecha de aceptación: {{ selectedContractedService.offer_created_at | date: 'dd/MM/yyyy · HH:mm' }}</p>
+                </div>
+              </div>
+
+              <div class="svc-detail-grid">
+                <!-- Información del cliente -->
+                <div class="svc-detail-card">
+                  <h4 class="svc-detail-card-title">👤 Cliente</h4>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Nombre</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.client_name || '—' }}</span>
+                  </div>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Teléfono</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.client_phone || '—' }}</span>
+                  </div>
+                </div>
+
+                <!-- Información del vehículo -->
+                <div class="svc-detail-card">
+                  <h4 class="svc-detail-card-title">🚗 Vehículo</h4>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Modelo</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.vehicle_name || '—' }}</span>
+                  </div>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Placa</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.vehicle_plate || '—' }}</span>
+                  </div>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Tipo emergencia</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.problem_type || '—' }}</span>
+                  </div>
+                </div>
+
+                <!-- Información de la emergencia -->
+                <div class="svc-detail-card">
+                  <h4 class="svc-detail-card-title">📍 Emergencia</h4>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Dirección</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.address || '—' }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.zone">
+                    <span class="svc-detail-label">Zona</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.zone }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.emergency_description">
+                    <span class="svc-detail-label">Descripción</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.emergency_description }}</span>
+                  </div>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Fecha emergencia</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.emergency_created_at | date: 'dd/MM/yyyy HH:mm' }}</span>
+                  </div>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Estado actual</span>
+                    <span class="dashboard-badge"
+                      [class.dashboard-badge-green]="selectedContractedService.emergency_status === 'servicio_finalizado'"
+                      [class.dashboard-badge-blue]="selectedContractedService.emergency_status === 'servicio_en_proceso' || selectedContractedService.emergency_status === 'tecnico_en_sitio' || selectedContractedService.emergency_status === 'auxilio_en_camino' || selectedContractedService.emergency_status === 'auxilio_asignado'"
+                      [class.dashboard-badge-yellow]="selectedContractedService.emergency_status === 'solicitud_recibida' || selectedContractedService.emergency_status === 'en_revision'"
+                      [class.dashboard-badge-red]="selectedContractedService.emergency_status === 'rechazado' || selectedContractedService.emergency_status === 'solicitud_cancelada'">
+                      {{ contractedServiceEmergencyStatusLabel(selectedContractedService.emergency_status) }}
+                    </span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.hora_llegada">
+                    <span class="svc-detail-label">Llegada técnico</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.hora_llegada | date: 'dd/MM/yyyy HH:mm' }}</span>
+                  </div>
+                </div>
+
+                <!-- Información de la cotización -->
+                <div class="svc-detail-card">
+                  <h4 class="svc-detail-card-title">💰 Cotización aceptada</h4>
+                  <div class="svc-detail-row">
+                    <span class="svc-detail-label">Monto total</span>
+                    <span class="svc-detail-value svc-price-highlight">{{ selectedContractedService.price != null ? 'Bs. ' + selectedContractedService.price : '—' }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.labor_cost != null">
+                    <span class="svc-detail-label">Mano de obra</span>
+                    <span class="svc-detail-value">Bs. {{ selectedContractedService.labor_cost }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.spare_parts_cost != null">
+                    <span class="svc-detail-label">Repuestos</span>
+                    <span class="svc-detail-value">Bs. {{ selectedContractedService.spare_parts_cost }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.estimated_service_time">
+                    <span class="svc-detail-label">Tiempo estimado</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.estimated_service_time }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.warranty">
+                    <span class="svc-detail-label">Garantía</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.warranty }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.service_description">
+                    <span class="svc-detail-label">Descripción servicio</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.service_description }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.spare_parts">
+                    <span class="svc-detail-label">Repuestos</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.spare_parts }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.labor_detail">
+                    <span class="svc-detail-label">Mano de obra detalle</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.labor_detail }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.observations">
+                    <span class="svc-detail-label">Observaciones</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.observations }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.condiciones_servicio">
+                    <span class="svc-detail-label">Condiciones</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.condiciones_servicio }}</span>
+                  </div>
+                  <div class="svc-detail-row" *ngIf="selectedContractedService.request_expires_at">
+                    <span class="svc-detail-label">Vigencia solicitud</span>
+                    <span class="svc-detail-value">{{ selectedContractedService.request_expires_at | date: 'dd/MM/yyyy HH:mm' }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Flujo operativo + Asignación de técnico -->
+              <div class="svc-next-steps">
+                <h4 class="svc-next-steps-title">Flujo operativo</h4>
+
+                <!-- Timeline de pasos -->
+                <div class="svc-next-steps-grid">
+                  <div class="svc-next-step"
+                    [class.svc-step-done]="(selectedContractedService.emergency_status && statusFilterGroup($any(selectedContractedService.emergency_status)) === 'activo') || selectedContractedService.emergency_status === 'servicio_finalizado'"
+                    [class.svc-step-active]="selectedContractedService.emergency_status === 'solicitud_recibida' || selectedContractedService.emergency_status === 'en_revision'">
+                    <span class="svc-step-icon">👷</span>
+                    <span class="svc-step-label">Asignar técnico</span>
+                    <span class="svc-step-hint">CU11</span>
+                  </div>
+                  <div class="svc-next-step"
+                    [class.svc-step-done]="selectedContractedService.emergency_status === 'auxilio_en_camino' || selectedContractedService.emergency_status === 'tecnico_en_sitio' || selectedContractedService.emergency_status === 'servicio_en_proceso' || selectedContractedService.emergency_status === 'servicio_finalizado'"
+                    [class.svc-step-active]="selectedContractedService.emergency_status === 'auxilio_asignado'">
+                    <span class="svc-step-icon">🚗</span>
+                    <span class="svc-step-label">En camino</span>
+                    <span class="svc-step-hint">CU22</span>
+                  </div>
+                  <div class="svc-next-step"
+                    [class.svc-step-done]="selectedContractedService.emergency_status === 'servicio_en_proceso' || selectedContractedService.emergency_status === 'servicio_finalizado'"
+                    [class.svc-step-active]="selectedContractedService.emergency_status === 'tecnico_en_sitio'">
+                    <span class="svc-step-icon">📍</span>
+                    <span class="svc-step-label">Técnico en sitio</span>
+                    <span class="svc-step-hint">CU22-B</span>
+                  </div>
+                  <div class="svc-next-step"
+                    [class.svc-step-done]="selectedContractedService.emergency_status === 'servicio_finalizado'"
+                    [class.svc-step-active]="selectedContractedService.emergency_status === 'servicio_en_proceso'">
+                    <span class="svc-step-icon">🔧</span>
+                    <span class="svc-step-label">En atención</span>
+                    <span class="svc-step-hint">CU23</span>
+                  </div>
+                  <div class="svc-next-step"
+                    [class.svc-step-done]="selectedContractedService.emergency_status === 'servicio_finalizado'"
+                    [class.svc-step-active]="selectedContractedService.emergency_status === 'servicio_finalizado'">
+                    <span class="svc-step-icon">✅</span>
+                    <span class="svc-step-label">Finalizado</span>
+                    <span class="svc-step-hint">CU24</span>
+                  </div>
+                </div>
+
+                <!-- Panel asignación de técnico -->
+                <div class="svc-assignment-panel" *ngIf="selectedContractedService.emergency_id">
+
+                  <!-- Paso 1: aceptar emergencia si aún está en solicitud_recibida o en_revision -->
+                  <ng-container *ngIf="selectedContractedService.emergency_status === 'solicitud_recibida' || selectedContractedService.emergency_status === 'en_revision' || selectedContractedService.emergency_status === null || selectedContractedService.emergency_status === 'pendiente'">
+                    <p class="svc-assignment-hint">
+                      Antes de asignar un técnico debes aceptar la emergencia. Esto inicia el proceso de atención.
+                    </p>
+                    <button
+                      class="cot-btn-primary svc-accept-btn"
+                      type="button"
+                      [disabled]="isUpdatingContractedStatus"
+                      (click)="acceptContractedEmergency()">
+                      {{ isUpdatingContractedStatus ? 'Aceptando...' : 'Aceptar emergencia y habilitar asignación' }}
+                    </button>
+                  </ng-container>
+
+                  <!-- Paso 2: asignar técnico — solo cuando status es exactamente 'activo' -->
+                  <ng-container *ngIf="selectedContractedService.emergency_status === 'activo'">
+                    <p class="svc-assignment-hint">Selecciona un técnico disponible de tu taller para esta emergencia:</p>
+
+                    <div *ngIf="contractedServiceAssignableTechnicians.length === 0" class="svc-no-technicians">
+                      No hay técnicos disponibles en este momento.
+                      <a class="cot-banner-link" (click)="selectSection('technicians')">Gestionar técnicos</a>
+                    </div>
+
+                    <div *ngIf="contractedServiceAssignableTechnicians.length > 0" class="svc-assignment-controls">
+                      <label class="technician-field">
+                        <span>Técnico disponible</span>
+                        <select [(ngModel)]="selectedContractedTechnicianId" name="selectedContractedTechnicianId">
+                          <option [ngValue]="null">— Seleccionar técnico —</option>
+                          <option *ngFor="let t of contractedServiceAssignableTechnicians" [ngValue]="t.id">
+                            {{ t.full_name }}
+                            <ng-container *ngIf="t.specialty"> · {{ t.specialty }}</ng-container>
+                          </option>
+                        </select>
+                      </label>
+                      <button
+                        class="cot-btn-primary"
+                        type="button"
+                        [disabled]="isAssigningContractedTechnician || !selectedContractedTechnicianId"
+                        (click)="assignContractedTechnician()">
+                        {{ isAssigningContractedTechnician ? 'Asignando...' : 'Asignar técnico' }}
+                      </button>
+                    </div>
+                  </ng-container>
+
+                  <!-- Técnico ya en camino / en sitio / en proceso -->
+                  <ng-container *ngIf="selectedContractedService.emergency_status === 'auxilio_asignado' || selectedContractedService.emergency_status === 'auxilio_en_camino' || selectedContractedService.emergency_status === 'tecnico_en_sitio' || selectedContractedService.emergency_status === 'servicio_en_proceso'">
+                    <p class="svc-assignment-hint">
+                      ✓ Técnico asignado. El servicio está en curso — sigue el avance desde la app móvil.
+                    </p>
+                  </ng-container>
+
+                  <!-- Finalizado -->
+                  <ng-container *ngIf="selectedContractedService.emergency_status === 'servicio_finalizado'">
+                    <p class="svc-assignment-hint svc-finalized">Servicio finalizado exitosamente.</p>
+                  </ng-container>
+
+                  <!-- Feedback -->
+                  <p class="svc-assignment-feedback" *ngIf="contractedAssignmentFeedback">
+                    {{ contractedAssignmentFeedback }}
+                  </p>
+                </div>
+              </div>
+
+            </ng-container>
+          </article>
+          <!-- ===== FIN SECCIÓN SERVICIOS CONTRATADOS ===== -->
+
+          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'workshops' && !isTenantSession">
+            <div class="dashboard-panel-head">
+              <div>
+                <p class="dashboard-panel-kicker">{{ isGlobalAdminSession ? 'Empresas registradas' : 'Registros recibidos' }}</p>
+                <h2>{{ isGlobalAdminSession ? 'Solicitudes de registro de empresas' : 'Registra tu taller mecánico' }}</h2>
               </div>
               <div class="dashboard-toolbar">
                 <span class="dashboard-toolbar-note">{{ workshops.length }} registros cargados</span>
@@ -1506,9 +2993,11 @@ type WorkshopFormModel = {
               </div>
             </div>
 
-            <p class="dashboard-loading" *ngIf="isLoading">Cargando talleres registrados...</p>
+            <p class="dashboard-loading" *ngIf="isLoading">
+              {{ isGlobalAdminSession ? 'Cargando empresas registradas...' : 'Cargando talleres registrados...' }}
+            </p>
             <p class="dashboard-empty" *ngIf="!isLoading && !workshops.length">
-              Aún no hay talleres registrados.
+              {{ isGlobalAdminSession ? 'No hay solicitudes de registro de empresas.' : 'Aún no hay talleres registrados.' }}
             </p>
 
             <div class="dashboard-table-wrap" *ngIf="!isLoading && workshops.length">
@@ -1613,7 +3102,7 @@ type WorkshopFormModel = {
             </div>
           </article>
 
-          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'technicians'">
+          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'technicians' && !isGlobalAdminSession">
             <div class="technician-crud">
               <div class="technician-crud-head">
                 <div>
@@ -1693,6 +3182,21 @@ type WorkshopFormModel = {
                     </select>
                   </label>
 
+                  <label class="technician-field" *ngIf="isTenantSession">
+                    <span>Sucursal *</span>
+                    <select
+                      name="sucursal_id"
+                      [(ngModel)]="technicianForm.sucursal_id"
+                      [disabled]="isAdminSucursalSession"
+                      required
+                    >
+                      <option [ngValue]="null" disabled>Selecciona una sucursal</option>
+                      <option *ngFor="let sucursal of sucursales" [ngValue]="sucursal.id">
+                        {{ sucursal.nombre }}
+                      </option>
+                    </select>
+                  </label>
+
                   <label class="technician-field technician-field-wide">
                     <span>Estado del tecnico</span>
                     <select name="status" [(ngModel)]="technicianForm.status" required>
@@ -1701,6 +3205,14 @@ type WorkshopFormModel = {
                       <option value="fuera_de_servicio">Fuera de servicio</option>
                     </select>
                   </label>
+
+                  <p
+                    class="technician-form-feedback technician-field-wide"
+                    *ngIf="isTenantSession && isAdminSucursalSession"
+                    style="margin-top:-0.25rem;"
+                  >
+                    El técnico quedará asignado automáticamente a tu sucursal.
+                  </p>
 
                   <p class="technician-form-feedback technician-field-wide" *ngIf="technicianFeedback">
                     {{ technicianFeedback }}
@@ -1731,6 +3243,7 @@ type WorkshopFormModel = {
                         <th>Telefono</th>
                         <th>Email</th>
                         <th>Especialidad</th>
+                        <th *ngIf="isTenantSession">Sucursal</th>
                         <th>Estado</th>
                         <th>Acciones</th>
                       </tr>
@@ -1746,6 +3259,9 @@ type WorkshopFormModel = {
                         <td data-label="Telefono">{{ technician.phone }}</td>
                         <td data-label="Email">{{ technician.email }}</td>
                         <td data-label="Especialidad">{{ technician.specialty }}</td>
+                        <td data-label="Sucursal" *ngIf="isTenantSession">
+                          {{ technician.sucursal_nombre || 'Sin sucursal' }}
+                        </td>
                         <td data-label="Estado">
                           <span class="dashboard-status-pill" [attr.data-status]="technician.status">
                             <span class="dashboard-status-dot"></span>
@@ -1863,9 +3379,6 @@ type WorkshopFormModel = {
               </section>
             </div>
           </article>
-        </section>
-      </section>
-
       <div class="dashboard-modal-backdrop" *ngIf="showWorkshopEditModal" (click)="cancelWorkshopEdit()">
         <section class="dashboard-modal-card" (click)="$event.stopPropagation()">
           <div class="dashboard-modal-head">
@@ -2114,6 +3627,512 @@ type WorkshopFormModel = {
         </section>
       </div>
 
+        <!-- ══════════════════════════════════════════════════════════════ -->
+        <!-- SECCIÓN: ORGANIZACIONES / TENANTS (solo admin)                -->
+        <!-- ══════════════════════════════════════════════════════════════ -->
+        <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'tenants' && !isWorkshopSession">
+          <div class="dashboard-panel-head">
+            <div>
+              <p class="dashboard-panel-kicker">Multi-tenant SaaS</p>
+              <h2>Gestión de Organizaciones</h2>
+            </div>
+            <div class="dashboard-toolbar">
+              <span class="dashboard-toolbar-note">{{ tenants.length }} organizaciones</span>
+              <button class="dashboard-refresh-button" type="button" (click)="openNewTenantForm()">+ Nueva organización</button>
+              <button class="dashboard-refresh-button" type="button" (click)="loadTenants()">Actualizar</button>
+            </div>
+          </div>
+
+          <p class="dashboard-loading" *ngIf="isTenantsLoading">Cargando organizaciones...</p>
+          <p class="dashboard-empty" *ngIf="!isTenantsLoading && !tenants.length && !showTenantForm">
+            No hay organizaciones registradas. Usa "+ Nueva organización" para crear una.
+          </p>
+
+          <!-- Formulario inline para crear / editar tenant -->
+          <div class="technician-form" *ngIf="showTenantForm">
+            <h3 style="margin:0 0 1rem;font-size:1rem;">{{ editingTenantId ? 'Editar organización' : 'Nueva organización' }}</h3>
+            <div class="technician-form-row">
+              <label class="technician-field">
+                <span>Nombre *</span>
+                <input type="text" [(ngModel)]="tenantForm.nombre" placeholder="Ej: Mecánicos Express" maxlength="200" />
+              </label>
+              <label class="technician-field">
+                <span>Estado</span>
+                <select [(ngModel)]="tenantForm.estado">
+                  <option value="activo">Activo</option>
+                  <option value="inactivo">Inactivo</option>
+                </select>
+              </label>
+            </div>
+            <label class="technician-field">
+              <span>Descripción</span>
+              <textarea [(ngModel)]="tenantForm.descripcion" rows="2" placeholder="Descripción opcional" maxlength="1000" style="width:100%;resize:vertical;"></textarea>
+            </label>
+            <p class="technician-feedback" *ngIf="tenantFeedback">{{ tenantFeedback }}</p>
+            <div class="technician-form-actions">
+              <button class="dashboard-refresh-button" type="button" (click)="saveTenant()" [disabled]="isSavingTenant">
+                {{ isSavingTenant ? 'Guardando...' : (editingTenantId ? 'Actualizar' : 'Crear') }}
+              </button>
+              <button class="dashboard-secondary-button" type="button" (click)="cancelTenantForm()">Cancelar</button>
+            </div>
+          </div>
+
+          <!-- Tabla de tenants -->
+          <div class="dashboard-table-wrap" *ngIf="!isTenantsLoading && tenants.length">
+            <table class="dashboard-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Nombre</th>
+                  <th>Descripción</th>
+                  <th>Estado</th>
+                  <th>Creado</th>
+                  <th>Opciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let tenant of tenants">
+                  <td data-label="ID"><span class="dashboard-id-chip">#{{ tenant.id }}</span></td>
+                  <td data-label="Nombre"><strong>{{ tenant.nombre }}</strong></td>
+                  <td data-label="Descripción">{{ tenant.descripcion || '—' }}</td>
+                  <td data-label="Estado">
+                    <span class="dashboard-status-pill" [attr.data-status]="tenant.estado === 'activo' ? 'activo' : 'rechazado'">
+                      {{ tenant.estado === 'activo' ? 'Activo' : 'Inactivo' }}
+                    </span>
+                  </td>
+                  <td data-label="Creado">{{ tenant.created_at | date: 'short' }}</td>
+                  <td data-label="Opciones">
+                    <div class="dashboard-table-actions">
+                      <button class="dashboard-refresh-button" type="button" (click)="editTenant(tenant)">Editar</button>
+                      <button
+                        class="dashboard-secondary-button"
+                        type="button"
+                        (click)="toggleTenantEstado(tenant)"
+                        [disabled]="tenant.id === 1"
+                        [title]="tenant.id === 1 ? 'El Tenant Principal no puede desactivarse' : ''"
+                      >
+                        {{ tenant.estado === 'activo' ? 'Desactivar' : 'Activar' }}
+                      </button>
+                      <button
+                        class="dashboard-danger-button"
+                        type="button"
+                        (click)="deleteTenant(tenant)"
+                        [disabled]="tenant.id === 1"
+                        [title]="tenant.id === 1 ? 'El Tenant Principal no puede eliminarse' : ''"
+                      >
+                        Eliminar
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- ══════════════════════════════════════════════════════════════════
+             PANEL: SUCURSALES (solo usuarios tenant)
+             ══════════════════════════════════════════════════════════════════ -->
+        <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'sucursales' && isTenantSession">
+          <div class="dashboard-panel-head">
+            <div>
+              <p class="dashboard-panel-kicker">Mi empresa</p>
+              <h2>Mis Sucursales</h2>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <span class="dashboard-toolbar-note">{{ sucursales.length }} sucursal{{ sucursales.length !== 1 ? 'es' : '' }}</span>
+              <button class="dashboard-refresh-button" type="button" (click)="loadSucursales()">Actualizar</button>
+              <button
+                class="dashboard-refresh-button"
+                type="button"
+                *ngIf="isSuperadminTenant"
+                (click)="openNuevaSucursal()"
+              >
+                + Nueva
+              </button>
+            </div>
+          </div>
+
+          <p *ngIf="isSucursalesLoading" style="padding:1rem;color:#666;">Cargando sucursales...</p>
+          <p *ngIf="!isSucursalesLoading && isAdminSucursalSession" style="padding:0 1rem 1rem;color:#666;">
+            Vista de solo lectura para tu rol. Puedes consultar la sucursal dentro de tu alcance, pero la creación y edición queda reservada al SUPERADMIN_TENANT.
+          </p>
+          <p *ngIf="!isSucursalesLoading && sucursalesFeedback" style="padding:0 1rem 1rem;color:#9a2e23;">
+            {{ sucursalesFeedback }}
+          </p>
+          <p *ngIf="!isSucursalesLoading && sucursales.length === 0" style="padding:1rem;color:#666;">
+            {{ isSuperadminTenant ? 'No hay sucursales registradas. Crea la primera con el botón "+ Nueva".' : 'No hay sucursales disponibles para tu alcance.' }}
+          </p>
+
+          <!-- Formulario inline de sucursal -->
+          <div class="technician-form" *ngIf="showSucursalForm">
+            <h3 style="margin-bottom:0.75rem;">{{ editingSucursalId ? 'Editar sucursal' : 'Nueva sucursal' }}</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;">
+              <label class="technician-field">
+                <span>Nombre *</span>
+                <input type="text" [(ngModel)]="sucursalForm.nombre" placeholder="Nombre de la sucursal" maxlength="200" />
+              </label>
+              <label class="technician-field">
+                <span>Ciudad</span>
+                <input type="text" [(ngModel)]="sucursalForm.ciudad" placeholder="Santa Cruz" maxlength="120" />
+              </label>
+              <label class="technician-field">
+                <span>Dirección</span>
+                <input
+                  type="text"
+                  [(ngModel)]="sucursalForm.direccion"
+                  placeholder="Dirección"
+                  maxlength="400"
+                  (input)="handleSucursalAddressManualInput()"
+                />
+              </label>
+              <label class="technician-field">
+                <span>Zona *</span>
+                <select [(ngModel)]="sucursalForm.zona">
+                  <option value="" disabled>Selecciona una zona</option>
+                  <option *ngFor="let zone of sucursalZoneOptions" [value]="zone.value">
+                    {{ zone.label }}
+                  </option>
+                </select>
+              </label>
+              <label class="technician-field">
+                <span>Teléfono</span>
+                <input type="tel" [(ngModel)]="sucursalForm.telefono" placeholder="Teléfono" maxlength="50" />
+              </label>
+              <label class="technician-field">
+                <span>Responsable</span>
+                <input type="text" [(ngModel)]="sucursalForm.responsable" placeholder="Responsable" maxlength="160" />
+              </label>
+            </div>
+            <div style="margin-top:1rem;">
+              <strong style="display:block;color:#0f172a;margin-bottom:0.55rem;">Servicios / Especialidades *</strong>
+              <small style="display:block;color:#64748b;margin-bottom:0.75rem;">
+                Selecciona las especialidades operativas que este taller puede atender.
+              </small>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.5rem;">
+                <label
+                  *ngFor="let specialty of sucursalSpecialtyOptions"
+                  style="display:flex;align-items:center;gap:0.55rem;border:1px solid #d7dfeb;border-radius:12px;padding:0.7rem 0.85rem;background:#fff;"
+                >
+                  <input
+                    type="checkbox"
+                    [checked]="isSucursalSpecialtySelected(specialty)"
+                    [disabled]="!isSuperadminTenant"
+                    (change)="toggleSucursalSpecialty(specialty, $any($event.target).checked)"
+                  />
+                  <span>{{ specialty }}</span>
+                </label>
+              </div>
+              <p style="margin:0.7rem 0 0;color:#64748b;font-size:0.9rem;">
+                {{ sucursalForm.especialidades.length ? sucursalForm.especialidades.join(' · ') : 'Sin especialidades seleccionadas.' }}
+              </p>
+            </div>
+            <div style="margin-top:1rem;">
+              <p style="margin:0 0 0.75rem;color:#64748b;font-size:0.9rem;">
+                Cada sucursal mantiene un taller operativo vinculado para emergencias y cotizaciones.
+                La primera especialidad seleccionada se sincroniza como especialidad principal compatible.
+              </p>
+              <div style="display:flex;justify-content:space-between;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem;">
+                <div>
+                  <strong style="display:block;color:#0f172a;">Selecciona la ubicación exacta de la sucursal</strong>
+                  <small style="color:#64748b;">Haz clic en el mapa o arrastra el marcador para elegir la ubicación exacta.</small>
+                </div>
+                <button
+                  class="dashboard-secondary-button"
+                  type="button"
+                  (click)="locateSucursalCurrentPosition()"
+                  [disabled]="isSucursalLocationLocating"
+                  [title]="
+                    isSucursalLocationLocating
+                      ? 'Ubicando...'
+                      : isSecureContext
+                        ? 'Usar ubicación actual'
+                        : 'La ubicación automática requiere HTTPS o localhost'
+                  "
+                >
+                  {{ isSucursalLocationLocating ? 'Ubicando...' : 'Usar ubicación actual' }}
+                </button>
+              </div>
+              <div
+                #sucursalMapCanvas
+                style="min-height:20rem;width:100%;border:1px solid #d7dfeb;border-radius:12px;overflow:hidden;background:#dfe7f2;"
+                aria-label="Mapa interactivo para seleccionar la ubicación exacta de la sucursal"
+              ></div>
+              <div style="display:grid;gap:0.35rem;margin-top:0.7rem;color:#475569;">
+                <strong style="color:#0f172a;font-size:0.92rem;">
+                  Lat: {{ formatCoordinate(sucursalForm.latitud) }} | Lng: {{ formatCoordinate(sucursalForm.longitud) }}
+                </strong>
+                <span *ngIf="isSucursalReverseGeocoding" style="color:#475569;font-size:0.85rem;font-weight:600;">
+                  Buscando dirección...
+                </span>
+                <span *ngIf="!isSucursalReverseGeocoding && sucursalDetectedAddress" style="color:#475569;font-size:0.85rem;font-weight:600;">
+                  Dirección detectada: {{ sucursalDetectedAddress }}
+                </span>
+                <span *ngIf="sucursalLocationMessage" style="color:#9a2e23;font-size:0.85rem;font-weight:600;">
+                  {{ sucursalLocationMessage }}
+                </span>
+                <button
+                  *ngIf="canApplySucursalDetectedAddress"
+                  class="dashboard-secondary-button"
+                  type="button"
+                  (click)="applySucursalDetectedAddress()"
+                  style="justify-self:start;"
+                >
+                  Usar dirección del mapa
+                </button>
+              </div>
+            </div>
+            <p *ngIf="sucursalesFeedback" class="technician-form-feedback" style="margin-top:0.85rem;">
+              {{ sucursalesFeedback }}
+            </p>
+            <p
+              *ngIf="editingSucursalId"
+              style="margin:0.85rem 0 0;color:#64748b;font-size:0.9rem;"
+            >
+              Revisa los datos y presiona Guardar cambios para aplicar la edición.
+            </p>
+            <div class="technician-form-actions">
+              <button class="dashboard-refresh-button" type="button" (click)="saveSucursal()">
+                {{ editingSucursalId ? 'Guardar cambios' : 'Crear sucursal' }}
+              </button>
+              <button class="dashboard-secondary-button" type="button" (click)="cancelSucursalForm()">Cancelar</button>
+            </div>
+          </div>
+
+          <div class="dashboard-table-wrap" *ngIf="!isSucursalesLoading && sucursales.length > 0">
+            <table class="dashboard-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Nombre</th>
+                  <th>Dirección / Zona</th>
+                  <th>Teléfono</th>
+                  <th>Responsable</th>
+                  <th>Estado</th>
+                  <th *ngIf="isSuperadminTenant">Opciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let suc of sucursales">
+                  <td data-label="ID"><span class="dashboard-id-chip">#{{ suc.id }}</span></td>
+                  <td data-label="Nombre"><strong>{{ suc.nombre }}</strong></td>
+                  <td data-label="Dirección / Zona">
+                    <div class="dashboard-table-primary">
+                      <strong>{{ suc.direccion || suc.ciudad || '—' }}{{ suc.zona ? ' · ' + suc.zona : '' }}</strong>
+                      <span>
+                        {{ suc.workshop_name || 'Sin taller operativo vinculado' }}
+                        {{ suc.workshop_specialty ? ' · ' + suc.workshop_specialty : '' }}
+                      </span>
+                      <span *ngIf="suc.especialidades.length; else noSucursalSpecialties" style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-top:0.35rem;">
+                        <span
+                          *ngFor="let specialty of suc.especialidades"
+                          class="dashboard-status-pill"
+                          data-status="pendiente"
+                          style="font-size:0.72rem;"
+                        >
+                          {{ specialty }}
+                        </span>
+                      </span>
+                      <ng-template #noSucursalSpecialties>
+                        <span>Sin especialidades registradas</span>
+                      </ng-template>
+                    </div>
+                  </td>
+                  <td data-label="Teléfono">{{ suc.telefono || '—' }}</td>
+                  <td data-label="Responsable">
+                    <div class="dashboard-table-primary">
+                      <strong>{{ suc.responsable || '—' }}</strong>
+                      <span>
+                        {{ suc.technicians_count }} técnico{{ suc.technicians_count === 1 ? '' : 's' }}
+                        {{ suc.workshop_availability_status ? ' · ' + suc.workshop_availability_status : '' }}
+                      </span>
+                    </div>
+                  </td>
+                  <td data-label="Estado">
+                    <span class="dashboard-status-pill" [attr.data-status]="suc.estado === 'activo' ? 'activo' : 'rechazado'">
+                      {{ suc.estado === 'activo' ? 'Activo' : 'Inactivo' }}
+                    </span>
+                  </td>
+                  <td data-label="Opciones" *ngIf="isSuperadminTenant">
+                    <div class="dashboard-table-actions">
+                      <button class="dashboard-refresh-button" type="button" (click)="editSucursal(suc)">Editar</button>
+                      <button class="dashboard-danger-button" type="button" (click)="deleteSucursal(suc.id)">Eliminar</button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <section
+            *ngIf="!isSucursalesLoading && sucursales.length > 0"
+            style="margin:1.25rem 1rem 0;padding:1.25rem;border-radius:20px;background:#fff;box-shadow:0 14px 34px rgba(15,23,42,0.08);border:1px solid #e2e8f0;"
+          >
+            <div style="display:grid;gap:0.3rem;margin-bottom:1rem;">
+              <h3 style="margin:0;color:#0f172a;font-size:1.2rem;">Mapa de sucursales</h3>
+              <p style="margin:0;color:#64748b;font-size:0.95rem;">
+                Visualiza la ubicación de todas las sucursales activas de tu empresa.
+              </p>
+            </div>
+
+            <p *ngIf="sucursalesOverviewData.length === 0" style="margin:0;color:#64748b;">
+              No hay sucursales con ubicación registrada.
+            </p>
+
+            <div
+              *ngIf="sucursalesOverviewData.length > 0"
+              #sucursalesOverviewMapCanvas
+              style="height:360px;width:100%;border:1px solid #d7dfeb;border-radius:16px;overflow:hidden;background:#dfe7f2;"
+              aria-label="Mapa general de sucursales activas del tenant"
+            ></div>
+          </section>
+        </article>
+
+        <!-- ══════════════════════════════════════════════════════════════════
+             PANEL: USUARIOS DE MI EMPRESA (solo SUPERADMIN_TENANT)
+             ══════════════════════════════════════════════════════════════════ -->
+        <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'usuarios_empresa' && isTenantSession">
+          <div class="dashboard-panel-head">
+            <div>
+              <p class="dashboard-panel-kicker">Mi empresa</p>
+              <h2>Usuarios</h2>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <span class="dashboard-toolbar-note">{{ usuariosEmpresa.length }} usuario{{ usuariosEmpresa.length !== 1 ? 's' : '' }}</span>
+              <button class="dashboard-refresh-button" type="button" (click)="loadUsuariosEmpresa()">Actualizar</button>
+              <button
+                class="dashboard-refresh-button"
+                type="button"
+                *ngIf="isSuperadminTenant"
+                (click)="openNuevoUsuarioEmpresa()"
+              >
+                + Nuevo
+              </button>
+            </div>
+          </div>
+
+          <p *ngIf="isUsuariosEmpresaLoading" style="padding:1rem;color:#666;">Cargando usuarios...</p>
+          <p *ngIf="!isUsuariosEmpresaLoading && !isSuperadminTenant" style="padding:0 1rem 1rem;color:#666;">
+            Vista de solo lectura para tu rol. La creación y edición de usuarios queda reservada al SUPERADMIN_TENANT.
+          </p>
+          <p *ngIf="!isUsuariosEmpresaLoading && usuariosEmpresa.length === 0" style="padding:1rem;color:#666;">
+            {{ isSuperadminTenant ? 'No hay usuarios registrados en esta empresa. Crea el primero con "+ Nuevo".' : 'No hay usuarios registrados en esta empresa.' }}
+          </p>
+
+          <!-- Formulario inline de usuario -->
+          <div class="technician-form" *ngIf="showUsuarioEmpresaForm && isSuperadminTenant">
+            <h3 style="margin-bottom:0.75rem;">{{ editingUsuarioEmpresaId ? 'Editar usuario' : 'Nuevo usuario' }}</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;">
+              <label class="technician-field">
+                <span>Nombre completo *</span>
+                <input
+                  type="text"
+                  [(ngModel)]="usuarioEmpresaForm.full_name"
+                  (ngModelChange)="handleUsuarioEmpresaNameInput()"
+                  placeholder="Nombre completo"
+                  maxlength="160"
+                />
+              </label>
+              <label class="technician-field">
+                <span>Correo *</span>
+                <input
+                  type="email"
+                  [(ngModel)]="usuarioEmpresaForm.email"
+                  (ngModelChange)="handleUsuarioEmpresaEmailInput()"
+                  placeholder="correo@empresa.com"
+                  maxlength="160"
+                  [disabled]="!!editingUsuarioEmpresaId"
+                />
+              </label>
+              <label class="technician-field">
+                <span>Teléfono</span>
+                <input type="tel" [(ngModel)]="usuarioEmpresaForm.phone" placeholder="Teléfono" maxlength="40" />
+              </label>
+              <label class="technician-field">
+                <span>Rol *</span>
+                <select [(ngModel)]="usuarioEmpresaForm.role" (ngModelChange)="handleUsuarioEmpresaRoleChange()">
+                  <option value="SUPERADMIN_TENANT">SUPERADMIN_TENANT</option>
+                  <option value="ADMIN_SUCURSAL">ADMIN_SUCURSAL</option>
+                  <option value="TECNICO">TECNICO</option>
+                  <option value="CLIENTE">CLIENTE</option>
+                </select>
+              </label>
+              <label class="technician-field">
+                <span>Sucursal{{ usuarioEmpresaForm.role === 'ADMIN_SUCURSAL' ? ' *' : '' }}</span>
+                <select [(ngModel)]="usuarioEmpresaForm.sucursal_id" (ngModelChange)="handleUsuarioEmpresaSucursalChange()">
+                  <option *ngIf="usuarioEmpresaForm.role !== 'ADMIN_SUCURSAL'" [ngValue]="null">— Sin sucursal —</option>
+                  <option *ngFor="let s of sucursales" [ngValue]="s.id">{{ s.nombre }}</option>
+                </select>
+              </label>
+              <label class="technician-field" *ngIf="!editingUsuarioEmpresaId">
+                <span>Contraseña *</span>
+                <input type="password" [(ngModel)]="usuarioEmpresaForm.password" placeholder="Mínimo 6 caracteres" minlength="6" />
+              </label>
+            </div>
+            <p
+              *ngIf="usuarioEmpresaForm.role === 'ADMIN_SUCURSAL'"
+              style="margin:0.85rem 0 0;color:#64748b;font-size:0.9rem;"
+            >
+              Selecciona la sucursal que administrará este usuario.
+            </p>
+            <p class="technician-feedback" *ngIf="usuariosEmpresaFeedback">{{ usuariosEmpresaFeedback }}</p>
+            <div class="technician-form-actions">
+              <button class="dashboard-refresh-button" type="button" (click)="saveUsuarioEmpresa()">
+                {{ editingUsuarioEmpresaId ? 'Actualizar' : 'Crear' }}
+              </button>
+              <button class="dashboard-secondary-button" type="button" (click)="cancelUsuarioEmpresaForm()">Cancelar</button>
+            </div>
+          </div>
+
+          <div class="dashboard-table-wrap" *ngIf="!isUsuariosEmpresaLoading && usuariosEmpresa.length > 0">
+            <table class="dashboard-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Nombre</th>
+                  <th>Correo</th>
+                  <th>Rol</th>
+                  <th>Sucursal</th>
+                  <th>Estado</th>
+                  <th *ngIf="isSuperadminTenant">Opciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let usr of usuariosEmpresa">
+                  <td data-label="ID"><span class="dashboard-id-chip">#{{ usr.id }}</span></td>
+                  <td data-label="Nombre"><strong>{{ usr.full_name }}</strong></td>
+                  <td data-label="Correo">{{ usr.email }}</td>
+                  <td data-label="Rol">
+                    <span class="dashboard-status-pill" style="background:rgba(66,133,244,0.12);color:#1a73e8;">
+                      {{ usr.role }}
+                    </span>
+                  </td>
+                  <td data-label="Sucursal">{{ usuarioEmpresaSucursalName(usr.sucursal_id) }}</td>
+                  <td data-label="Estado">
+                    <span class="dashboard-status-pill" [attr.data-status]="usr.estado === 'activo' ? 'activo' : 'rechazado'">
+                      {{ usr.estado === 'activo' ? 'Activo' : 'Inactivo' }}
+                    </span>
+                  </td>
+                  <td data-label="Opciones" *ngIf="isSuperadminTenant">
+                    <div class="dashboard-table-actions">
+                      <button class="dashboard-refresh-button" type="button" (click)="editUsuarioEmpresa(usr)">Editar</button>
+                      <button
+                        class="dashboard-danger-button"
+                        type="button"
+                        (click)="deleteUsuarioEmpresa(usr.id)"
+                        [disabled]="usr.id === currentUserId"
+                      >Eliminar</button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+      </section>
+    </section>
+
       <div class="dashboard-modal-backdrop" *ngIf="showEmergencyModal && selectedMaintenanceRequest" (click)="closeEmergencyModal()">
         <section class="dashboard-modal-card emergency-modal-card" (click)="$event.stopPropagation()">
           <div class="dashboard-panel-head">
@@ -2207,6 +4226,44 @@ type WorkshopFormModel = {
                 Rechazada el {{ selectedMaintenanceRequest.rejectedAt | date: 'dd/MM/yyyy · HH:mm' }}
               </span>
             </div>
+
+            <!-- ── CU22-B: Panel Técnico en Sitio ─────────────────────────── -->
+            <div class="emergency-detail-block cu22-arrival-block"
+              [class.cu22-arrival-confirmed]="selectedMaintenanceRequest.horaLlegada">
+              <strong class="cu22-arrival-title">
+                <span class="cu22-arrival-icon">📍</span>
+                Llegada del técnico
+              </strong>
+              <ng-container *ngIf="selectedMaintenanceRequest.horaLlegada; else noArrival">
+                <p class="cu22-arrival-status cu22-confirmed">Técnico en sitio</p>
+                <p class="cu22-arrival-time">
+                  Llegada registrada a las
+                  <strong>{{ selectedMaintenanceRequest.horaLlegada | date: 'HH:mm' }}</strong>
+                  del {{ selectedMaintenanceRequest.horaLlegada | date: 'dd/MM/yyyy' }}
+                </p>
+                <p *ngIf="selectedMaintenanceRequest.latitudLlegada != null && selectedMaintenanceRequest.longitudLlegada != null"
+                  class="cu22-arrival-coords">
+                  Coordenadas de llegada:
+                  {{ selectedMaintenanceRequest.latitudLlegada | number: '1.4-6' }},
+                  {{ selectedMaintenanceRequest.longitudLlegada | number: '1.4-6' }}
+                  &nbsp;
+                  <a class="cu22-coords-link"
+                    [href]="'https://www.google.com/maps?q=' + selectedMaintenanceRequest.latitudLlegada + ',' + selectedMaintenanceRequest.longitudLlegada"
+                    target="_blank" rel="noopener">Ver en mapa</a>
+                </p>
+                <p *ngIf="selectedMaintenanceRequest.assignedTechnicianName" class="cu22-arrival-tech">
+                  Técnico: <strong>{{ selectedMaintenanceRequest.assignedTechnicianName }}</strong>
+                </p>
+                <p class="cu22-notification-badge cu22-notified">
+                  ✓ Cliente notificado
+                </p>
+              </ng-container>
+              <ng-template #noArrival>
+                <p class="cu22-arrival-status cu22-pending">El técnico aún no confirmó llegada</p>
+                <p class="cu22-arrival-hint">La confirmación se registra desde la app móvil del técnico.</p>
+              </ng-template>
+            </div>
+            <!-- ── FIN CU22-B ──────────────────────────────────────────────── -->
 
             <div class="emergency-detail-block" *ngIf="selectedEmergencyWasReassigned">
               <strong>Solicitud reasignada automáticamente</strong>
@@ -2511,20 +4568,34 @@ export class DashboardPageComponent implements OnDestroy {
   readonly technicianSpecialtyOptions = TECHNICIAN_SPECIALTY_OPTIONS;
   readonly workshopZoneOptions = WORKSHOP_ZONE_OPTIONS;
   readonly workshopSpecialtyOptions = WORKSHOP_SPECIALTY_OPTIONS;
+  readonly sucursalZoneOptions = SUCURSAL_ZONE_OPTIONS;
+  readonly sucursalSpecialtyOptions = SUCURSAL_SPECIALTY_OPTIONS;
   readonly isSecureContext = typeof window !== 'undefined' ? window.isSecureContext : false;
   private readonly http = inject(HttpClient);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly router = inject(Router);
+  private readonly realtimeService = inject(RealtimeService);
   private readonly workshopsApiUrl = `${API_BASE_URL}/workshops`;
   private readonly techniciansApiUrl = `${API_BASE_URL}/technicians`;
   private readonly clientsApiUrl = `${API_BASE_URL}/clientes`;
   private readonly emergenciesApiUrl = `${API_BASE_URL}/emergencias`;
   private readonly dashboardOverviewApiUrl = `${API_BASE_URL}/dashboard/operational-overview`;
+  private readonly tenantsApiUrl = `${API_BASE_URL}/tenants`;
   private readonly backendBaseUrl = BACKEND_BASE_URL;
   private readonly appSessionStorageKey = APP_SESSION_STORAGE_KEY;
   private readonly dashboardSidebarStorageKey = 'dashboard.sidebar.collapsed';
   private readonly emergencyRefreshMs = 15000;
-  private emergencyRefreshTimer: number | undefined;
+  private readonly realtimeRefreshDebounceMs = 1000;
+  private emergencyRefreshTimer: number | null = null;
+  private realtimeRefreshTimer: number | null = null;
+  private pendingRealtimeRefresh: Required<RealtimeRefreshRequest> = {
+    overview: false,
+    emergencies: false,
+    quotationRequests: false,
+    quotationHistory: false,
+    contractedServices: false,
+    tracking: false,
+  };
 
   readonly requests: DashboardItem[] = [
     {
@@ -2548,6 +4619,7 @@ export class DashboardPageComponent implements OnDestroy {
   ];
 
   maintenanceRequests: MaintenanceRequest[] = [];
+  emergenciesFeedback = '';
   lastSeenPendingEmergencyId = 0;
 
   maintenanceSearch = '';
@@ -2565,8 +4637,15 @@ export class DashboardPageComponent implements OnDestroy {
   workshops: WorkshopRegistration[] = [];
   technicians: Technician[] = [];
   clients: Client[] = [];
+  tenants: TenantRecord[] = [];
   operationalOverview: DashboardOperationalOverview | null = null;
   isLoading = true;
+  isTenantsLoading = false;
+  isSavingTenant = false;
+  showTenantForm = false;
+  editingTenantId: number | null = null;
+  tenantFeedback = '';
+  tenantForm: { nombre: string; descripcion: string; estado: string } = { nombre: '', descripcion: '', estado: 'activo' };
   isTechniciansLoading = true;
   isClientsLoading = true;
   isEmergenciesLoading = true;
@@ -2599,6 +4678,11 @@ export class DashboardPageComponent implements OnDestroy {
   workshopsPage = 1;
   readonly workshopsPageSize = 15;
   private readonly adminSession: AppSession | null = this.readAdminSession();
+  private realtimeSubscriptions = new Subscription();
+  realtimeConnectionState: ConnectionState = 'idle';
+  realtimeEventCount = 0;
+  private resolvedWorkshopId: number | null = null;
+  private isResolvingWorkshopContext = false;
   clientPendingDelete: Client | null = null;
   showEmergencyModal = false;
   private emergencyMap?: any;
@@ -2608,11 +4692,69 @@ export class DashboardPageComponent implements OnDestroy {
   private workshopEditMapMarker?: any;
   private workshopEditMapResizeTimer?: number;
   private workshopEditMapHost?: HTMLDivElement;
+  private sucursalMap?: any;
+  private sucursalMapMarker?: any;
+  private sucursalMapResizeTimer?: number;
+  private sucursalMapHost?: HTMLDivElement;
+  private sucursalesOverviewMap?: any;
+  private sucursalesOverviewMarkers: any[] = [];
+  private sucursalesOverviewMapResizeTimer?: number;
+  private sucursalesOverviewMapHost?: HTMLDivElement;
   isWorkshopLocationLocating = false;
   workshopLocationMessage = '';
   selectedSyncRecordId: number | null = null;
   syncTab: SyncTab = 'errors';
   selectedSyncErrorRecordId: number | null = null;
+  quotationRequests: QuotationRequest[] = [];
+  quotationOffers: QuotationOffer[] = [];
+  contractedServices: ContractedService[] = [];
+  isQuotationRequestsLoading = false;
+  isQuotationHistoryLoading = false;
+  isContractedServicesLoading = false;
+  selectedContractedService: ContractedService | null = null;
+  contractedServicesView: 'list' | 'detail' = 'list';
+  selectedContractedTechnicianId: number | null = null;
+  isAssigningContractedTechnician = false;
+  isUpdatingContractedStatus = false;
+  contractedAssignmentFeedback = '';
+  quotationView: 'list' | 'detail' | 'offer_form' | 'confirmation' = 'list';
+  selectedQuotationRequest: QuotationRequest | null = null;
+  selectedQuotationEmergency: EmergencyReport | null = null;
+  isQuotationEmergencyLoading = false;
+  quotationEmergencyPhotoUrls: string[] = [];
+  quotationEmergencyAudioUrl: string | null = null;
+  quotationEmergencyMapEmbedUrl: SafeResourceUrl | null = null;
+  quotationEmergencyMapExternalUrl: string | null = null;
+  quotationOfferForm: QuotationOfferFormModel = this.createEmptyQuotationOfferForm();
+  isSubmittingOffer = false;
+  quotationOfferFeedback = '';
+  lastSubmittedOffer: QuotationOffer | null = null;
+  selectedWorkshopOffer: QuotationOffer | null = null;
+  selectedQuotationOffers: QuotationOffer[] = [];
+
+  // ── TENANT: Sucursales ──────────────────────────────────────────────────────
+  sucursales: SucursalRecord[] = [];
+  isSucursalesLoading = false;
+  sucursalesFeedback = '';
+  showSucursalForm = false;
+  editingSucursalId: number | null = null;
+  sucursalForm: SucursalFormModel = this.createEmptySucursalForm();
+  isSucursalLocationLocating = false;
+  isSucursalReverseGeocoding = false;
+  sucursalLocationMessage = '';
+  sucursalDetectedAddress = '';
+  private sucursalAddressTouchedManually = false;
+  private sucursalLastAutofilledAddress = '';
+
+  // ── TENANT: Usuarios de la empresa ─────────────────────────────────────────
+  usuariosEmpresa: UsuarioEmpresaRecord[] = [];
+  isUsuariosEmpresaLoading = false;
+  usuariosEmpresaFeedback = '';
+  showUsuarioEmpresaForm = false;
+  editingUsuarioEmpresaId: number | null = null;
+  usuarioEmpresaForm: UsuarioEmpresaFormModel = this.createEmptyUsuarioEmpresaForm();
+  private usuarioEmpresaNameTouchedManually = false;
+  private usuarioEmpresaEmailTouchedManually = false;
 
   @ViewChild('emergencyMapCanvas')
   set emergencyMapCanvas(element: ElementRef<HTMLDivElement> | undefined) {
@@ -2638,6 +4780,30 @@ export class DashboardPageComponent implements OnDestroy {
     });
   }
 
+  @ViewChild('sucursalMapCanvas')
+  set sucursalMapCanvas(element: ElementRef<HTMLDivElement> | undefined) {
+    if (!element || typeof window === 'undefined' || !this.showSucursalForm) {
+      return;
+    }
+
+    window.setTimeout(() => {
+      this.initializeSucursalMap(element.nativeElement);
+      this.renderSucursalMap();
+    });
+  }
+
+  @ViewChild('sucursalesOverviewMapCanvas')
+  set sucursalesOverviewMapCanvas(element: ElementRef<HTMLDivElement> | undefined) {
+    if (!element || typeof window === 'undefined' || this.selectedSection !== 'sucursales') {
+      return;
+    }
+
+    window.setTimeout(() => {
+      this.initializeSucursalesOverviewMap(element.nativeElement);
+      this.renderSucursalesOverviewMap();
+    });
+  }
+
   technicianForm: TechnicianFormModel = this.createEmptyTechnicianForm();
   workshopForm: WorkshopFormModel = this.createEmptyWorkshopForm();
   clientForm: ClientFormModel = this.createEmptyClientForm();
@@ -2645,9 +4811,9 @@ export class DashboardPageComponent implements OnDestroy {
   stats: DashboardStat[] = [
     {
       label: 'Solicitudes hoy',
-      value: '18',
-      detail: 'Auxilios y consultas registradas durante la jornada.',
-      trend: '+12%',
+      value: '0',
+      detail: 'Pendiente de cargar desde PostgreSQL.',
+      trend: 'Live',
       tone: 'gold',
     },
     {
@@ -2682,10 +4848,11 @@ export class DashboardPageComponent implements OnDestroy {
 
   constructor() {
     this.isSidebarCollapsed = this.readSidebarCollapsedState();
+    this.selectedSection = this.defaultSection;
 
     if (this.isWorkshopSession) {
-      this.selectedSection = 'dashboard';
       this.maintenanceFilter = 'pendiente';
+      this.resolveWorkshopContext();
     }
 
     this.loadOperationalOverview();
@@ -2694,12 +4861,14 @@ export class DashboardPageComponent implements OnDestroy {
     this.loadClients();
     this.loadEmergencies();
     this.startEmergencyRefresh();
+    this.initializeRealtime();
   }
 
   ngOnDestroy(): void {
-    if (typeof window !== 'undefined' && this.emergencyRefreshTimer !== undefined) {
-      window.clearInterval(this.emergencyRefreshTimer);
-    }
+    this.realtimeSubscriptions.unsubscribe();
+    this.realtimeService.disconnect();
+    this.stopEmergencyRefresh();
+    this.clearRealtimeRefreshTimer();
 
     if (typeof window !== 'undefined' && this.emergencyMapResizeTimer !== undefined) {
       window.clearTimeout(this.emergencyMapResizeTimer);
@@ -2709,6 +4878,14 @@ export class DashboardPageComponent implements OnDestroy {
       window.clearTimeout(this.workshopEditMapResizeTimer);
     }
 
+    if (typeof window !== 'undefined' && this.sucursalMapResizeTimer !== undefined) {
+      window.clearTimeout(this.sucursalMapResizeTimer);
+    }
+
+    if (typeof window !== 'undefined' && this.sucursalesOverviewMapResizeTimer !== undefined) {
+      window.clearTimeout(this.sucursalesOverviewMapResizeTimer);
+    }
+
     if (this.emergencyMap) {
       this.emergencyMap.remove();
       this.emergencyMap = undefined;
@@ -2716,6 +4893,8 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     this.destroyWorkshopEditMap();
+    this.destroySucursalMap();
+    this.destroySucursalesOverviewMap();
   }
 
   get sectionTitle(): string {
@@ -2728,7 +4907,7 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     if (this.selectedSection === 'workshops') {
-      return 'Gestion de Solicitudes';
+      return this.isGlobalAdminSession ? 'Solicitudes de Empresas' : 'Gestion de Solicitudes';
     }
 
     if (this.selectedSection === 'maintenance') {
@@ -2751,6 +4930,30 @@ export class DashboardPageComponent implements OnDestroy {
       return 'Sincronización offline';
     }
 
+    if (this.selectedSection === 'quotation_requests') {
+      return this.isTenantQuotationSession ? 'Solicitudes de cotización' : 'Solicitudes recibidas';
+    }
+
+    if (this.selectedSection === 'quotation_history') {
+      return this.isTenantQuotationSession ? 'Historial de cotizaciones' : 'Mis cotizaciones';
+    }
+
+    if (this.selectedSection === 'contracted_services') {
+      return 'Servicios contratados';
+    }
+
+    if (this.selectedSection === 'tenants') {
+      return 'Organizaciones';
+    }
+
+    if (this.selectedSection === 'sucursales') {
+      return 'Mis Sucursales';
+    }
+
+    if (this.selectedSection === 'usuarios_empresa') {
+      return 'Usuarios de mi Empresa';
+    }
+
     return 'Resumen general';
   }
 
@@ -2762,16 +4965,188 @@ export class DashboardPageComponent implements OnDestroy {
     return this.adminSession?.role === 'workshop';
   }
 
+  get isGlobalAdminSession(): boolean {
+    return isGlobalAdmin(this.adminSession?.role ?? '');
+  }
+
+  get isTenantSession(): boolean {
+    return isTenantRole(this.adminSession?.role ?? '');
+  }
+
+  get isSuperadminTenant(): boolean {
+    return isTenantSuperadmin(this.adminSession?.role ?? '');
+  }
+
+  get isAdminSucursalSession(): boolean {
+    return isSucursalAdmin(this.adminSession?.role ?? '');
+  }
+
+  get isTecnicoSession(): boolean {
+    return isTechnicianRole(this.adminSession?.role ?? '');
+  }
+
+  get currentUserId(): number | null {
+    return this.adminSession?.id ?? null;
+  }
+
+  get tenantDisplayName(): string {
+    return this.adminSession?.fullName?.trim() || 'Mi Empresa';
+  }
+
+  get defaultSection(): DashboardSection {
+    return 'dashboard';
+  }
+
+  get tenantAuthHeaders(): Record<string, string> {
+    const token = this.adminSession?.accessToken;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
   get currentWorkshopId(): number | null {
-    return this.isWorkshopSession ? this.adminSession?.id ?? null : null;
+    if (!this.isWorkshopSession) {
+      return null;
+    }
+
+    return this.resolvedWorkshopId ?? this.adminSession?.id ?? null;
+  }
+
+  get isTenantQuotationSession(): boolean {
+    return this.isSuperadminTenant || this.isAdminSucursalSession;
+  }
+
+  get sucursalesOverviewData(): SucursalRecord[] {
+    return this.sucursales.filter((sucursal) => this.shouldIncludeSucursalInOverview(sucursal));
+  }
+
+  get isGlobalSaasOverview(): boolean {
+    return this.operationalOverview?.scope === 'global_saas';
+  }
+
+  get showComparativeOperationalPanels(): boolean {
+    const scope = this.operationalOverview?.scope ?? '';
+    return !this.isWorkshopSession && ['tenant', 'sucursal', 'global'].includes(scope);
+  }
+
+  get showRecentOperationalPanel(): boolean {
+    return this.operationalOverview?.scope !== 'global_saas';
+  }
+
+  get showOperationalAnalyticsPanel(): boolean {
+    return this.showRecentOperationalPanel && !!this.operationalOverview?.analytics_summary?.length;
+  }
+
+  get overviewHeroKicker(): string {
+    if (this.isWorkshopSession) {
+      return 'Tenant operativo';
+    }
+
+    if (this.isGlobalSaasOverview) {
+      return 'Control SaaS';
+    }
+
+    return 'Control multitenant';
+  }
+
+  get overviewHeroTitle(): string {
+    if (this.isWorkshopSession) {
+      return 'Operación del Taller';
+    }
+
+    if (this.isGlobalSaasOverview) {
+      return 'Vista Global de Tenants';
+    }
+
+    return 'Vista Global del Sistema';
+  }
+
+  get statusPanelKicker(): string {
+    return this.isGlobalSaasOverview ? 'Estado de tenants' : 'Estados del proceso';
+  }
+
+  get statusPanelTitle(): string {
+    if (this.isWorkshopSession) {
+      return 'Pipeline del Taller';
+    }
+
+    return this.isGlobalSaasOverview ? 'Distribución SaaS' : 'Distribución Global';
+  }
+
+  get statusPanelEmptyMessage(): string {
+    return this.isGlobalSaasOverview
+      ? 'Todavía no hay estados de tenants para mostrar.'
+      : 'Todavía no hay estados operativos para mostrar.';
+  }
+
+  get recentPanelTitle(): string {
+    return this.isWorkshopSession ? 'Solicitudes Recientes del Taller' : 'Últimas Emergencias del Sistema';
+  }
+
+  statusPanelItemDetail(count: number): string {
+    return this.isGlobalSaasOverview
+      ? `${count} tenants registrados en esta categoría.`
+      : `${count} solicitudes registradas en este estado.`;
+  }
+
+  formatAnalyticsMinutes(value: number | null): string {
+    return typeof value === 'number' ? `${Math.round(value)} min` : 'Sin datos';
+  }
+
+  formatAnalyticsPercent(value: number | null): string {
+    return typeof value === 'number' ? `${value.toFixed(1)}%` : 'No disponible';
   }
 
   canAccessSection(section: DashboardSection): boolean {
-    if (!this.isWorkshopSession) {
-      return true;
+    if (section === 'workshops') {
+      return false;
     }
 
-    return section === 'dashboard' || section === 'technicians' || section === 'emergencies' || section === 'reports' || section === 'sync';
+    if (this.isTenantSession) {
+      if (this.isSuperadminTenant) {
+        return [
+          'dashboard',
+          'sucursales',
+          'usuarios_empresa',
+          'technicians',
+          'clients',
+          'emergencies',
+          'reports',
+          'quotation_requests',
+          'quotation_history',
+          'contracted_services',
+        ].includes(section);
+      }
+
+      if (this.isAdminSucursalSession) {
+        return [
+          'dashboard',
+          'sucursales',
+          'usuarios_empresa',
+          'technicians',
+          'clients',
+          'emergencies',
+          'reports',
+          'quotation_requests',
+          'quotation_history',
+          'contracted_services',
+        ].includes(section);
+      }
+
+      if (this.isTecnicoSession) {
+        return ['dashboard', 'technicians', 'emergencies', 'reports'].includes(section);
+      }
+
+      return ['dashboard', 'emergencies', 'reports'].includes(section);
+    }
+
+    if (!this.isWorkshopSession) {
+      // Admin global: accede a todo excepto secciones tenant
+      return section !== 'technicians' && section !== 'tenants' && section !== 'sucursales' && section !== 'usuarios_empresa'
+        ? true
+        : section === 'tenants' && isGlobalAdmin(this.adminSession?.role ?? '');
+    }
+
+    // Sesión workshop legacy
+    return section === 'dashboard' || section === 'technicians' || section === 'emergencies' || section === 'reports' || section === 'sync' || section === 'quotation_requests' || section === 'quotation_history' || section === 'contracted_services';
   }
 
   get maintenanceRequestsFiltered(): MaintenanceRequest[] {
@@ -3028,9 +5403,9 @@ export class DashboardPageComponent implements OnDestroy {
       .put<EmergencyReport>(
         `${this.emergenciesApiUrl}/${selected.id}/status`,
         { emergency_status: nextStatus },
-        {
-          params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
-        },
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
       )
       .subscribe({
         next: (updatedReport) => {
@@ -3089,7 +5464,9 @@ export class DashboardPageComponent implements OnDestroy {
       .put<EmergencyReport>(
         `${this.emergenciesApiUrl}/${selected.id}/technician-assignment`,
         { technician_id: this.selectedEmergencyTechnicianId },
-        { params: { workshop_id: this.currentWorkshopId } },
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
       )
       .subscribe({
         next: (updatedReport) => {
@@ -3129,9 +5506,12 @@ export class DashboardPageComponent implements OnDestroy {
     this.isUpdatingEmergencyStatus = true;
 
     this.http
-      .delete(`${this.emergenciesApiUrl}/${selected.id}`, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
-      })
+      .delete(
+        `${this.emergenciesApiUrl}/${selected.id}`,
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
+      )
       .subscribe({
         next: () => {
           this.isUpdatingEmergencyStatus = false;
@@ -3148,15 +5528,25 @@ export class DashboardPageComponent implements OnDestroy {
   loadEmergencies(options?: { refreshSelectedTimeline?: boolean; silentTimelineRefresh?: boolean }): void {
     const refreshSelectedTimeline = options?.refreshSelectedTimeline ?? true;
     const silentTimelineRefresh = options?.silentTimelineRefresh ?? false;
-    this.isEmergenciesLoading = true;
+    this.emergenciesFeedback = '';
 
-    const params: Record<string, string> = {};
-
-    if (this.currentWorkshopId) {
-      params['nearest_workshop_id'] = String(this.currentWorkshopId);
+    if (this.isGlobalAdminSession) {
+      this.maintenanceRequests = [];
+      this.selectedMaintenanceRequestId = null;
+      this.isEmergenciesLoading = false;
+      this.emergenciesFeedback = 'Las emergencias operativas por tenant no aplican para SUPERADMIN_GLOBAL.';
+      this.renderSelectedEmergencyMap();
+      return;
     }
 
-    this.http.get<EmergencyReport[]>(this.emergenciesApiUrl, { params }).subscribe({
+    this.isEmergenciesLoading = true;
+
+    this.http.get<EmergencyReport[]>(
+      this.emergenciesApiUrl,
+      this.buildAuthRequestOptions({
+        nearest_workshop_id: this.currentWorkshopId,
+      }),
+    ).subscribe({
       next: (reports) => {
         const previousSelectedId = this.selectedMaintenanceRequestId;
         this.maintenanceRequests = reports.map((report) => this.mapEmergencyReportToRequest(report));
@@ -3171,10 +5561,13 @@ export class DashboardPageComponent implements OnDestroy {
         this.isEmergenciesLoading = false;
         this.renderSelectedEmergencyMap();
       },
-      error: () => {
+      error: (error) => {
         this.maintenanceRequests = [];
         this.selectedMaintenanceRequestId = null;
         this.isEmergenciesLoading = false;
+        this.emergenciesFeedback = error?.status === 403
+          ? 'No tienes acceso a esta lista de emergencias con el alcance actual.'
+          : 'No se pudo cargar la lista de emergencias.';
         this.renderSelectedEmergencyMap();
       },
     });
@@ -3212,9 +5605,12 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     this.http
-      .get<EmergencyTimelineResponse>(`${this.emergenciesApiUrl}/${selected.id}/timeline`, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
-      })
+      .get<EmergencyTimelineResponse>(
+        `${this.emergenciesApiUrl}/${selected.id}/timeline`,
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
+      )
       .subscribe({
         next: (timeline) => {
           this.selectedEmergencyTimeline = this.normalizeEmergencyTimeline(timeline, selected);
@@ -3245,9 +5641,12 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     this.http
-      .get<EmergencyTrackingResponse>(`${this.emergenciesApiUrl}/${selected.id}/tracking`, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
-      })
+      .get<EmergencyTrackingResponse>(
+        `${this.emergenciesApiUrl}/${selected.id}/tracking`,
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
+      )
       .subscribe({
         next: (tracking) => {
           this.selectedEmergencyTracking = tracking;
@@ -3285,7 +5684,9 @@ export class DashboardPageComponent implements OnDestroy {
           observacion: 'Cambio realizado desde dashboard web',
         },
         {
-          params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
+          ...this.buildAuthRequestOptions({
+            workshop_id: this.currentWorkshopId,
+          }),
         },
       )
       .subscribe({
@@ -3338,7 +5739,9 @@ export class DashboardPageComponent implements OnDestroy {
           changed_by_user_id: typeof this.adminSession?.id === 'number' ? this.adminSession.id : null,
         },
         {
-          params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
+          ...this.buildAuthRequestOptions({
+            workshop_id: this.currentWorkshopId,
+          }),
         },
       )
       .subscribe({
@@ -3364,17 +5767,172 @@ export class DashboardPageComponent implements OnDestroy {
   }
 
   private startEmergencyRefresh(): void {
-    if (typeof window === 'undefined') {
+    if (typeof window === 'undefined' || this.emergencyRefreshTimer !== null || this.realtimeConnectionState === 'connected') {
       return;
     }
 
     this.emergencyRefreshTimer = window.setInterval(() => {
+      this.runEmergencyRefreshCycle();
+    }, this.emergencyRefreshMs);
+  }
+
+  private runEmergencyRefreshCycle(): void {
+    this.loadOperationalOverview();
+    this.loadEmergencies({
+      refreshSelectedTimeline: this.showEmergencyModal,
+      silentTimelineRefresh: this.showEmergencyModal,
+    });
+    if (this.selectedSection === 'quotation_history' || this.selectedSection === 'quotation_requests') {
+      this.loadQuotationHistory();
+    }
+    if (this.selectedSection === 'contracted_services') {
+      this.loadContractedServices();
+    }
+  }
+
+  private ensureFallbackPolling(immediate = false): void {
+    const shouldRunImmediately = immediate && this.emergencyRefreshTimer === null;
+    this.startEmergencyRefresh();
+    if (shouldRunImmediately) {
+      this.runEmergencyRefreshCycle();
+    }
+  }
+
+  private stopEmergencyRefresh(): void {
+    if (typeof window === 'undefined' || this.emergencyRefreshTimer === null) {
+      return;
+    }
+
+    window.clearInterval(this.emergencyRefreshTimer);
+    this.emergencyRefreshTimer = null;
+  }
+
+  private updateRealtimePollingMode(state: ConnectionState): void {
+    if (state === 'connected') {
+      this.stopEmergencyRefresh();
+      return;
+    }
+
+    if (state === 'idle' || state === 'connecting') {
+      this.startEmergencyRefresh();
+      return;
+    }
+
+    if (state === 'reconnecting' || state === 'disconnected' || state === 'error') {
+      this.ensureFallbackPolling(true);
+    }
+  }
+
+  private mapRealtimeEventToRefreshRequest(
+    event: { type: string; entity_id?: number | null; payload?: { emergency_id?: number } | undefined },
+  ): RealtimeRefreshRequest | null {
+    if (DASHBOARD_EMERGENCY_REFRESH_EVENT_TYPES.has(event.type)) {
+      return {
+        overview: true,
+        emergencies: true,
+      };
+    }
+
+    if (event.type === 'tracking_location_updated') {
+      const selectedEmergencyId = this.selectedMaintenanceRequestId;
+      const eventEmergencyId = event.entity_id ?? event.payload?.emergency_id ?? null;
+      if (selectedEmergencyId !== null && eventEmergencyId === selectedEmergencyId) {
+        return {
+          tracking: true,
+        };
+      }
+      return null;
+    }
+
+    if (DASHBOARD_QUOTATION_REFRESH_EVENT_TYPES.has(event.type)) {
+      return {
+        overview: true,
+        quotationRequests: this.isWorkshopSession,
+        quotationHistory: this.isWorkshopSession,
+        contractedServices: this.isWorkshopSession,
+      };
+    }
+
+    return null;
+  }
+
+  private scheduleRealtimeRefresh(request: RealtimeRefreshRequest): void {
+    this.pendingRealtimeRefresh = {
+      overview: this.pendingRealtimeRefresh.overview || Boolean(request.overview),
+      emergencies: this.pendingRealtimeRefresh.emergencies || Boolean(request.emergencies),
+      quotationRequests: this.pendingRealtimeRefresh.quotationRequests || Boolean(request.quotationRequests),
+      quotationHistory: this.pendingRealtimeRefresh.quotationHistory || Boolean(request.quotationHistory),
+      contractedServices: this.pendingRealtimeRefresh.contractedServices || Boolean(request.contractedServices),
+      tracking: this.pendingRealtimeRefresh.tracking || Boolean(request.tracking),
+    };
+
+    if (typeof window === 'undefined') {
+      this.flushRealtimeRefresh();
+      return;
+    }
+
+    if (this.realtimeRefreshTimer !== null) {
+      return;
+    }
+
+    this.realtimeRefreshTimer = window.setTimeout(() => {
+      this.realtimeRefreshTimer = null;
+      this.flushRealtimeRefresh();
+    }, this.realtimeRefreshDebounceMs);
+  }
+
+  private flushRealtimeRefresh(): void {
+    const request = this.pendingRealtimeRefresh;
+    this.pendingRealtimeRefresh = {
+      overview: false,
+      emergencies: false,
+      quotationRequests: false,
+      quotationHistory: false,
+      contractedServices: false,
+      tracking: false,
+    };
+
+    if (request.overview) {
       this.loadOperationalOverview();
+    }
+
+    if (request.emergencies) {
       this.loadEmergencies({
         refreshSelectedTimeline: this.showEmergencyModal,
         silentTimelineRefresh: this.showEmergencyModal,
       });
-    }, this.emergencyRefreshMs);
+    }
+
+    if (request.quotationRequests) {
+      this.loadQuotationRequests();
+    }
+
+    if (request.quotationHistory) {
+      this.loadQuotationHistory();
+    }
+
+    if (request.contractedServices) {
+      this.loadContractedServices();
+    }
+
+    if (request.tracking && this.showEmergencyModal && this.selectedMaintenanceRequestId !== null) {
+      this.loadSelectedEmergencyTracking(true);
+    }
+  }
+
+  private clearRealtimeRefreshTimer(): void {
+    if (typeof window !== 'undefined' && this.realtimeRefreshTimer !== null) {
+      window.clearTimeout(this.realtimeRefreshTimer);
+    }
+    this.realtimeRefreshTimer = null;
+    this.pendingRealtimeRefresh = {
+      overview: false,
+      emergencies: false,
+      quotationRequests: false,
+      quotationHistory: false,
+      contractedServices: false,
+      tracking: false,
+    };
   }
 
   private syncEmergencyStatusInView(status: EmergencyStatus | null | undefined, emergencyId: number): void {
@@ -3437,6 +5995,9 @@ export class DashboardPageComponent implements OnDestroy {
       assignedTechnicianSpecialty: report.assigned_technician_specialty,
       rejectionReason: report.rejection_reason?.trim() || null,
       rejectedAt: report.rejected_at,
+      horaLlegada: report.hora_llegada ?? null,
+      latitudLlegada: report.latitud_llegada ?? null,
+      longitudLlegada: report.longitud_llegada ?? null,
     };
   }
 
@@ -3599,9 +6160,13 @@ export class DashboardPageComponent implements OnDestroy {
   private hasValidCoordinates(latitude: number | null, longitude: number | null): boolean {
     return (
       typeof latitude === 'number' &&
-      typeof longitude === 'number' &&
       Number.isFinite(latitude) &&
-      Number.isFinite(longitude)
+      latitude >= -90 &&
+      latitude <= 90 &&
+      typeof longitude === 'number' &&
+      Number.isFinite(longitude) &&
+      longitude >= -180 &&
+      longitude <= 180
     );
   }
 
@@ -4009,6 +6574,358 @@ export class DashboardPageComponent implements OnDestroy {
     this.workshopEditMapHost = undefined;
   }
 
+  private initializeSucursalMap(element: HTMLDivElement): void {
+    if (typeof L === 'undefined') {
+      return;
+    }
+
+    if (this.sucursalMapHost && this.sucursalMapHost !== element) {
+      this.destroySucursalMap();
+    }
+
+    this.sucursalMapHost = element;
+
+    if (!this.sucursalMap) {
+      const [latitude, longitude] = this.getSucursalCoordinates();
+
+      this.sucursalMap = L.map(element, {
+        zoomControl: true,
+        scrollWheelZoom: true,
+      }).setView([latitude, longitude], 13);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+      }).addTo(this.sucursalMap);
+
+      this.sucursalMapMarker = L.marker([latitude, longitude], {
+        draggable: true,
+      }).addTo(this.sucursalMap);
+
+      this.sucursalMapMarker.on('dragend', () => {
+        const position = this.sucursalMapMarker.getLatLng();
+        this.updateSucursalSelectedLocation(position.lat, position.lng);
+      });
+
+      this.sucursalMap.on('click', (event: { latlng: { lat: number; lng: number } }) => {
+        this.updateSucursalSelectedLocation(event.latlng.lat, event.latlng.lng);
+      });
+    }
+
+    this.scheduleSucursalMapResize();
+  }
+
+  private renderSucursalMap(animate = false): void {
+    if (!this.sucursalMap || !this.sucursalMapMarker) {
+      return;
+    }
+
+    const [latitude, longitude] = this.getSucursalCoordinates();
+    this.sucursalMapMarker.setLatLng([latitude, longitude]);
+    this.sucursalMap.setView([latitude, longitude], 15, { animate });
+    this.scheduleSucursalMapResize();
+  }
+
+  private updateSucursalSelectedLocation(latitude: number, longitude: number): void {
+    this.sucursalForm = {
+      ...this.sucursalForm,
+      latitud: latitude,
+      longitud: longitude,
+    };
+    this.sucursalLocationMessage = '';
+
+    if (this.sucursalMapMarker) {
+      this.sucursalMapMarker.setLatLng([latitude, longitude]);
+    }
+
+    this.reverseGeocodeSucursal(latitude, longitude);
+  }
+
+  private getSucursalCoordinates(): [number, number] {
+    const latitude =
+      typeof this.sucursalForm.latitud === 'number' && Number.isFinite(this.sucursalForm.latitud)
+        ? this.sucursalForm.latitud
+        : SANTA_CRUZ_DEFAULT_COORDINATES.latitud;
+    const longitude =
+      typeof this.sucursalForm.longitud === 'number' && Number.isFinite(this.sucursalForm.longitud)
+        ? this.sucursalForm.longitud
+        : SANTA_CRUZ_DEFAULT_COORDINATES.longitud;
+
+    return [latitude, longitude];
+  }
+
+  private scheduleSucursalMapResize(): void {
+    if (typeof window === 'undefined' || !this.sucursalMap) {
+      return;
+    }
+
+    if (this.sucursalMapResizeTimer !== undefined) {
+      window.clearTimeout(this.sucursalMapResizeTimer);
+    }
+
+    this.sucursalMapResizeTimer = window.setTimeout(() => {
+      this.sucursalMap?.invalidateSize();
+    }, 120);
+  }
+
+  private reverseGeocodeSucursal(latitude: number, longitude: number): void {
+    this.isSucursalReverseGeocoding = true;
+    this.sucursalLocationMessage = '';
+
+    this.http.get<ReverseGeocodeResponse>('https://nominatim.openstreetmap.org/reverse', {
+      params: {
+        format: 'jsonv2',
+        lat: latitude.toFixed(6),
+        lon: longitude.toFixed(6),
+        'accept-language': 'es',
+      },
+    }).subscribe({
+      next: (response) => {
+        this.isSucursalReverseGeocoding = false;
+        const detectedAddress = this.buildSucursalDetectedAddress(response);
+
+        if (!detectedAddress) {
+          this.sucursalDetectedAddress = '';
+          this.sucursalLocationMessage =
+            'No se pudo obtener dirección exacta. Puedes escribirla manualmente.';
+          return;
+        }
+
+        this.sucursalDetectedAddress = detectedAddress;
+
+        if (!this.sucursalAddressTouchedManually || !this.sucursalForm.direccion.trim()) {
+          this.sucursalForm = {
+            ...this.sucursalForm,
+            direccion: detectedAddress,
+          };
+          this.sucursalLastAutofilledAddress = detectedAddress;
+          this.sucursalAddressTouchedManually = false;
+        }
+
+        const detectedCity = response.address?.city || response.address?.town || response.address?.village || '';
+        if (!this.sucursalForm.ciudad.trim() && detectedCity) {
+          this.sucursalForm = {
+            ...this.sucursalForm,
+            ciudad: detectedCity,
+          };
+        }
+      },
+      error: () => {
+        this.isSucursalReverseGeocoding = false;
+        this.sucursalDetectedAddress = '';
+        this.sucursalLocationMessage =
+          'No se pudo obtener la dirección automáticamente. Puedes escribirla manualmente.';
+      },
+    });
+  }
+
+  private buildSucursalDetectedAddress(response: ReverseGeocodeResponse): string {
+    const road = response.address?.road || response.address?.pedestrian || '';
+    const suburb = response.address?.suburb || response.address?.neighbourhood || '';
+    const city = response.address?.city || response.address?.town || response.address?.village || '';
+    const shortAddress = [road, suburb, city].filter(Boolean).join(', ');
+
+    if (shortAddress.length >= 8) {
+      return shortAddress;
+    }
+
+    return (response.display_name || '').trim();
+  }
+
+  private normalizeSucursalZoneValue(zone: string | null): string {
+    const normalized = (zone || '').trim().toLowerCase();
+    const match = this.sucursalZoneOptions.find(
+      (option) => option.value.toLowerCase() === normalized || option.label.toLowerCase() === normalized,
+    );
+
+    return match?.value ?? '';
+  }
+
+  private resetSucursalLocationState(): void {
+    this.isSucursalLocationLocating = false;
+    this.isSucursalReverseGeocoding = false;
+    this.sucursalLocationMessage = '';
+    this.sucursalDetectedAddress = '';
+    this.sucursalAddressTouchedManually = false;
+    this.sucursalLastAutofilledAddress = '';
+  }
+
+  private destroySucursalMap(): void {
+    if (typeof window !== 'undefined' && this.sucursalMapResizeTimer !== undefined) {
+      window.clearTimeout(this.sucursalMapResizeTimer);
+      this.sucursalMapResizeTimer = undefined;
+    }
+
+    if (this.sucursalMap) {
+      this.sucursalMap.remove();
+      this.sucursalMap = undefined;
+      this.sucursalMapMarker = undefined;
+    }
+
+    this.sucursalMapHost = undefined;
+  }
+
+  private shouldIncludeSucursalInOverview(sucursal: SucursalRecord): boolean {
+    if (sucursal.estado !== 'activo') {
+      return false;
+    }
+
+    if (!this.hasValidCoordinates(sucursal.latitud, sucursal.longitud)) {
+      return false;
+    }
+
+    if (this.isAdminSucursalSession) {
+      return sucursal.id === (this.adminSession?.sucursalId ?? null);
+    }
+
+    return true;
+  }
+
+  private initializeSucursalesOverviewMap(element: HTMLDivElement): void {
+    if (typeof L === 'undefined') {
+      return;
+    }
+
+    if (this.sucursalesOverviewMapHost && this.sucursalesOverviewMapHost !== element) {
+      this.destroySucursalesOverviewMap();
+    }
+
+    this.sucursalesOverviewMapHost = element;
+
+    if (!this.sucursalesOverviewMap) {
+      this.sucursalesOverviewMap = L.map(element, {
+        zoomControl: true,
+        scrollWheelZoom: true,
+      }).setView(
+        [SANTA_CRUZ_DEFAULT_COORDINATES.latitud, SANTA_CRUZ_DEFAULT_COORDINATES.longitud],
+        11,
+      );
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+      }).addTo(this.sucursalesOverviewMap);
+    }
+
+    this.scheduleSucursalesOverviewMapResize();
+  }
+
+  private renderSucursalesOverviewMap(): void {
+    if (!this.sucursalesOverviewMap) {
+      return;
+    }
+
+    this.clearSucursalesOverviewMarkers();
+
+    const sucursales = this.sucursalesOverviewData;
+    if (!sucursales.length) {
+      return;
+    }
+
+    const bounds = L.latLngBounds([]);
+
+    for (const sucursal of sucursales) {
+      const latitude = sucursal.latitud as number;
+      const longitude = sucursal.longitud as number;
+      const marker = L.marker([latitude, longitude]).addTo(this.sucursalesOverviewMap);
+
+      marker.bindPopup(this.buildSucursalOverviewPopup(sucursal));
+      marker.bindTooltip(this.escapeHtml(sucursal.nombre), {
+        direction: 'top',
+      });
+
+      this.sucursalesOverviewMarkers.push(marker);
+      bounds.extend([latitude, longitude]);
+    }
+
+    if (sucursales.length === 1) {
+      const sucursal = sucursales[0];
+      this.sucursalesOverviewMap.setView([sucursal.latitud as number, sucursal.longitud as number], 14, {
+        animate: false,
+      });
+    } else {
+      this.sucursalesOverviewMap.fitBounds(bounds, {
+        padding: [30, 30],
+        maxZoom: 14,
+      });
+    }
+
+    this.scheduleSucursalesOverviewMapResize();
+  }
+
+  private buildSucursalOverviewPopup(sucursal: SucursalRecord): string {
+    const especialidades = sucursal.especialidades.length
+      ? sucursal.especialidades.join(', ')
+      : sucursal.workshop_specialty || 'Sin especialidades registradas';
+    const direccion = sucursal.direccion?.trim() || sucursal.ciudad?.trim() || 'Sin dirección registrada';
+    const zona = sucursal.zona?.trim() || 'Sin zona registrada';
+    const responsable = sucursal.responsable?.trim() || 'Sin responsable asignado';
+    const tecnicos =
+      typeof sucursal.technicians_count === 'number'
+        ? `${sucursal.technicians_count} técnico${sucursal.technicians_count === 1 ? '' : 's'}`
+        : 'Sin técnicos registrados';
+
+    return `
+      <div style="min-width:220px;display:grid;gap:0.2rem;">
+        <strong>${this.escapeHtml(sucursal.nombre)}</strong>
+        <span>${this.escapeHtml(direccion)}</span>
+        <span><strong>Zona:</strong> ${this.escapeHtml(zona)}</span>
+        <span><strong>Responsable:</strong> ${this.escapeHtml(responsable)}</span>
+        <span><strong>Especialidades:</strong> ${this.escapeHtml(especialidades)}</span>
+        <span><strong>Técnicos:</strong> ${this.escapeHtml(tecnicos)}</span>
+      </div>
+    `;
+  }
+
+  private clearSucursalesOverviewMarkers(): void {
+    for (const marker of this.sucursalesOverviewMarkers) {
+      marker.remove();
+    }
+
+    this.sucursalesOverviewMarkers = [];
+  }
+
+  private scheduleSucursalesOverviewMapResize(): void {
+    if (typeof window === 'undefined' || !this.sucursalesOverviewMap) {
+      return;
+    }
+
+    if (this.sucursalesOverviewMapResizeTimer !== undefined) {
+      window.clearTimeout(this.sucursalesOverviewMapResizeTimer);
+    }
+
+    this.sucursalesOverviewMapResizeTimer = window.setTimeout(() => {
+      this.sucursalesOverviewMap?.invalidateSize();
+    }, 120);
+  }
+
+  private refreshSucursalesOverviewMap(): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (!this.sucursalesOverviewData.length) {
+      this.destroySucursalesOverviewMap();
+      return;
+    }
+
+    window.setTimeout(() => this.renderSucursalesOverviewMap(), 0);
+  }
+
+  private destroySucursalesOverviewMap(): void {
+    if (typeof window !== 'undefined' && this.sucursalesOverviewMapResizeTimer !== undefined) {
+      window.clearTimeout(this.sucursalesOverviewMapResizeTimer);
+      this.sucursalesOverviewMapResizeTimer = undefined;
+    }
+
+    this.clearSucursalesOverviewMarkers();
+
+    if (this.sucursalesOverviewMap) {
+      this.sucursalesOverviewMap.remove();
+      this.sucursalesOverviewMap = undefined;
+    }
+
+    this.sucursalesOverviewMapHost = undefined;
+  }
+
   private escapeHtml(value: string): string {
     return value
       .replaceAll('&', '&amp;')
@@ -4061,6 +6978,10 @@ export class DashboardPageComponent implements OnDestroy {
     return this.technicians.slice(0, 4);
   }
 
+  private isActiveTechnician(technician: Technician): boolean {
+    return ACTIVE_TECHNICIAN_STATUSES.includes(technician.status);
+  }
+
   get filteredTechnicians(): Technician[] {
     if (this.technicianFilter === 'todos') {
       return this.technicians;
@@ -4070,7 +6991,7 @@ export class DashboardPageComponent implements OnDestroy {
       return this.technicians.filter((technician) => technician.status === 'fuera_de_servicio');
     }
 
-    return this.technicians.filter((technician) => technician.status !== 'fuera_de_servicio');
+    return this.technicians.filter((technician) => this.isActiveTechnician(technician));
   }
 
   get uniqueZonesCount(): number {
@@ -4096,6 +7017,7 @@ export class DashboardPageComponent implements OnDestroy {
       email: '',
       specialty: '',
       status: 'disponible',
+      sucursal_id: this.isAdminSucursalSession ? this.adminSession?.sucursalId ?? null : null,
     };
   }
 
@@ -4110,6 +7032,50 @@ export class DashboardPageComponent implements OnDestroy {
       latitude: null,
       longitude: null,
       password: '',
+    };
+  }
+
+  createEmptySucursalForm(): SucursalFormModel {
+    return {
+      nombre: '',
+      direccion: '',
+      zona: '',
+      ciudad: 'Santa Cruz',
+      latitud: SANTA_CRUZ_DEFAULT_COORDINATES.latitud,
+      longitud: SANTA_CRUZ_DEFAULT_COORDINATES.longitud,
+      telefono: '',
+      responsable: '',
+      especialidades: [],
+    };
+  }
+
+  createEmptyUsuarioEmpresaForm(): UsuarioEmpresaFormModel {
+    return {
+      email: '',
+      full_name: '',
+      phone: '',
+      password: '',
+      role: 'TECNICO',
+      sucursal_id: null,
+    };
+  }
+
+  isSucursalSpecialtySelected(specialty: string): boolean {
+    return this.sucursalForm.especialidades.includes(specialty);
+  }
+
+  toggleSucursalSpecialty(specialty: string, checked: boolean): void {
+    if (!this.isSuperadminTenant) {
+      return;
+    }
+
+    const next = checked
+      ? [...this.sucursalForm.especialidades, specialty]
+      : this.sucursalForm.especialidades.filter((value) => value !== specialty);
+
+    this.sucursalForm = {
+      ...this.sucursalForm,
+      especialidades: Array.from(new Set(next)),
     };
   }
 
@@ -4134,9 +7100,17 @@ export class DashboardPageComponent implements OnDestroy {
     };
   }
 
+  private refreshTechnicianViews(): void {
+    this.loadTechnicians();
+    this.loadOperationalOverview();
+    if (this.isTenantSession) {
+      this.loadSucursales();
+    }
+  }
+
   selectSection(section: DashboardSection): void {
     if (!this.canAccessSection(section)) {
-      this.selectedSection = this.isWorkshopSession ? 'dashboard' : 'emergencies';
+      this.selectedSection = this.defaultSection;
       return;
     }
 
@@ -4159,6 +7133,41 @@ export class DashboardPageComponent implements OnDestroy {
         window.setTimeout(() => this.renderSelectedEmergencyMap());
       }
     }
+
+    if (section === 'quotation_requests') {
+      this.resetQuotationView();
+      this.loadQuotationRequests();
+    }
+
+    if (section === 'quotation_history') {
+      this.loadQuotationHistory();
+    }
+
+    if (section === 'contracted_services') {
+      this.contractedServicesView = 'list';
+      this.selectedContractedService = null;
+      this.contractedAssignmentFeedback = '';
+      this.loadContractedServices();
+      if (!this.technicians.length) {
+        this.loadTechnicians();
+      }
+    }
+
+    if (section === 'tenants') {
+      this.loadTenants();
+    }
+
+    if (section === 'sucursales') {
+      this.loadSucursales();
+      if (typeof window !== 'undefined') {
+        window.setTimeout(() => this.refreshSucursalesOverviewMap(), 0);
+      }
+    }
+
+    if (section === 'usuarios_empresa') {
+      if (!this.sucursales.length) this.loadSucursales();
+      this.loadUsuariosEmpresa();
+    }
   }
 
   toggleSidebar(): void {
@@ -4174,11 +7183,46 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     if (typeof window !== 'undefined') {
+      this.stopEmergencyRefresh();
+      this.clearRealtimeRefreshTimer();
+      this.realtimeService.disconnect();
       window.localStorage.removeItem(this.appSessionStorageKey);
       window.sessionStorage.removeItem(this.appSessionStorageKey);
     }
 
     void this.router.navigate(['/login']);
+  }
+
+  private initializeRealtime(): void {
+    if (!this.adminSession?.accessToken) {
+      return;
+    }
+
+    this.realtimeSubscriptions.add(
+      this.realtimeService.connectionState$.subscribe((state) => {
+        this.realtimeConnectionState = state;
+        this.updateRealtimePollingMode(state);
+        console.log('[realtime] connectionState', state);
+      }),
+    );
+
+    this.realtimeSubscriptions.add(
+      this.realtimeService.events$.subscribe((event) => {
+        this.realtimeEventCount += 1;
+        console.log('[realtime]', event);
+        if (event.type === 'ws_connected') {
+          this.realtimeService.sendPing();
+          return;
+        }
+
+        const refreshRequest = this.mapRealtimeEventToRefreshRequest(event);
+        if (refreshRequest) {
+          this.scheduleRealtimeRefresh(refreshRequest);
+        }
+      }),
+    );
+
+    this.realtimeService.connect();
   }
 
   goToPreviousWorkshopsPage(): void {
@@ -4191,6 +7235,10 @@ export class DashboardPageComponent implements OnDestroy {
 
   techniciansByStatus(status: TechnicianStatus): number {
     return this.technicians.filter((technician) => technician.status === status).length;
+  }
+
+  activeTechniciansCount(): number {
+    return this.technicians.filter((technician) => this.isActiveTechnician(technician)).length;
   }
 
   statusLabel(status: TechnicianStatus): string {
@@ -4229,6 +7277,7 @@ export class DashboardPageComponent implements OnDestroy {
       status === 'activo' ||
       status === 'auxilio_asignado' ||
       status === 'auxilio_en_camino' ||
+      status === 'tecnico_en_sitio' ||
       status === 'servicio_en_proceso' ||
       status === 'servicio_finalizado'
     ) {
@@ -4328,9 +7377,9 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     const label = normalizedRole === 'workshop'
-      ? 'workshop'
-      : normalizedRole === 'admin'
-        ? 'admin'
+      ? 'Empresa / Taller'
+      : normalizedRole === 'admin' || normalizedRole === 'SUPERADMIN_GLOBAL'
+        ? 'SUPERADMIN_GLOBAL'
         : normalizedRole;
 
     return userId ? `${label} #${userId}` : label;
@@ -4369,6 +7418,9 @@ export class DashboardPageComponent implements OnDestroy {
 
   startCreate(): void {
     this.selectedSection = 'technicians';
+    if (this.isTenantSession && !this.sucursales.length) {
+      this.loadSucursales();
+    }
     this.showTechnicianForm = true;
     this.editingTechnicianId = null;
     this.technicianFeedback = '';
@@ -4388,6 +7440,9 @@ export class DashboardPageComponent implements OnDestroy {
 
   editTechnician(technician: Technician): void {
     this.selectedSection = 'technicians';
+    if (this.isTenantSession && !this.sucursales.length) {
+      this.loadSucursales();
+    }
     this.showTechnicianForm = true;
     this.editingTechnicianId = technician.id;
     this.technicianFeedback = '';
@@ -4397,6 +7452,7 @@ export class DashboardPageComponent implements OnDestroy {
       email: technician.email,
       specialty: technician.specialty,
       status: technician.status,
+      sucursal_id: technician.sucursal_id ?? (this.isAdminSucursalSession ? this.adminSession?.sucursalId ?? null : null),
     };
   }
 
@@ -4408,10 +7464,16 @@ export class DashboardPageComponent implements OnDestroy {
       email: this.technicianForm.email.trim(),
       specialty: this.technicianForm.specialty.trim(),
       status: this.technicianForm.status,
+      sucursal_id: this.technicianForm.sucursal_id,
     };
 
     if (!payload.full_name || !payload.phone || !payload.email || !payload.specialty) {
       this.technicianFeedback = 'Completa todos los campos del tecnico antes de guardar.';
+      return;
+    }
+
+    if (this.isTenantSession && !payload.sucursal_id) {
+      this.technicianFeedback = 'Selecciona una sucursal para el técnico.';
       return;
     }
 
@@ -4421,7 +7483,9 @@ export class DashboardPageComponent implements OnDestroy {
     if (this.editingTechnicianId) {
       this.http
         .put<Technician>(`${this.techniciansApiUrl}/${this.editingTechnicianId}`, payload, {
-          params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
+          ...this.buildAuthRequestOptions({
+            workshop_id: this.currentWorkshopId,
+          }),
         })
         .subscribe({
           next: () => {
@@ -4429,7 +7493,7 @@ export class DashboardPageComponent implements OnDestroy {
             this.technicianFeedback = 'Tecnico actualizado correctamente.';
             this.resetTechnicianForm();
             this.showTechnicianForm = false;
-            this.loadTechnicians();
+            this.refreshTechnicianViews();
           },
           error: () => {
             this.isSavingTechnician = false;
@@ -4440,16 +7504,20 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     this.http
-      .post<Technician>(this.techniciansApiUrl, payload, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
-      })
+      .post<Technician>(
+        this.techniciansApiUrl,
+        payload,
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
+      )
       .subscribe({
         next: () => {
           this.isSavingTechnician = false;
           this.technicianFeedback = 'Tecnico registrado correctamente.';
           this.resetTechnicianForm();
           this.showTechnicianForm = false;
-          this.loadTechnicians();
+          this.refreshTechnicianViews();
         },
         error: () => {
           this.isSavingTechnician = false;
@@ -4466,13 +7534,16 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     this.http
-      .delete(`${this.techniciansApiUrl}/${technician.id}`, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
-      })
+      .delete(
+        `${this.techniciansApiUrl}/${technician.id}`,
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
+      )
       .subscribe({
         next: () => {
           this.technicianFeedback = 'Tecnico eliminado correctamente.';
-          this.loadTechnicians();
+          this.refreshTechnicianViews();
         },
         error: () => {
           this.technicianFeedback = 'No se pudo eliminar el tecnico.';
@@ -4496,12 +7567,15 @@ export class DashboardPageComponent implements OnDestroy {
         email: technician.email,
         specialty: technician.specialty,
         status: nextStatus,
+        sucursal_id: technician.sucursal_id,
       }, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
+        ...this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
       })
       .subscribe({
         next: () => {
-          this.loadTechnicians();
+          this.refreshTechnicianViews();
         },
       });
   }
@@ -4521,7 +7595,7 @@ export class DashboardPageComponent implements OnDestroy {
     this.http
       .put<WorkshopRegistration>(`${this.workshopsApiUrl}/${workshop.id}/approval-status`, {
         approval_status: nextStatus,
-      })
+      }, this.buildAuthRequestOptions())
       .subscribe({
         next: () => {
           this.isUpdatingWorkshopApproval = false;
@@ -4559,7 +7633,7 @@ export class DashboardPageComponent implements OnDestroy {
       return;
     }
 
-    this.http.delete(`${this.workshopsApiUrl}/${workshop.id}`).subscribe({
+    this.http.delete(`${this.workshopsApiUrl}/${workshop.id}`, this.buildAuthRequestOptions()).subscribe({
       next: () => {
         this.loadWorkshops();
       },
@@ -4664,7 +7738,7 @@ export class DashboardPageComponent implements OnDestroy {
     this.isSavingWorkshop = true;
     this.workshopEditFeedback = '';
 
-    this.http.put<WorkshopRegistration>(`${this.workshopsApiUrl}/${this.editingWorkshopId}`, payload).subscribe({
+    this.http.put<WorkshopRegistration>(`${this.workshopsApiUrl}/${this.editingWorkshopId}`, payload, this.buildAuthRequestOptions()).subscribe({
       next: () => {
         this.isSavingWorkshop = false;
         this.cancelWorkshopEdit();
@@ -4677,6 +7751,123 @@ export class DashboardPageComponent implements OnDestroy {
     });
   }
 
+  // ── Tenant CRUD ────────────────────────────────────────────────────────────
+
+  loadTenants(): void {
+    if (this.isWorkshopSession) {
+      return;
+    }
+    this.isTenantsLoading = true;
+    this.tenantFeedback = '';
+    this.http.get<TenantRecord[]>(this.tenantsApiUrl, this.buildAuthRequestOptions()).subscribe({
+      next: (rows) => { this.tenants = rows; this.isTenantsLoading = false; },
+      error: (err) => {
+        this.tenants = [];
+        this.isTenantsLoading = false;
+        if (err?.status === 401 || err?.status === 403 || err?.error?.detail === 'TOKEN_SIN_TENANT') {
+          this.tenantFeedback = 'Tu sesión no tiene JWT válido. Cierra sesión y vuelve a ingresar para ver las organizaciones.';
+          this.showTenantForm = true;
+        }
+      },
+    });
+  }
+
+  openNewTenantForm(): void {
+    this.editingTenantId = null;
+    this.tenantForm = { nombre: '', descripcion: '', estado: 'activo' };
+    this.tenantFeedback = '';
+    this.showTenantForm = true;
+  }
+
+  editTenant(tenant: TenantRecord): void {
+    this.editingTenantId = tenant.id;
+    this.tenantForm = { nombre: tenant.nombre, descripcion: tenant.descripcion ?? '', estado: tenant.estado };
+    this.tenantFeedback = '';
+    this.showTenantForm = true;
+  }
+
+  cancelTenantForm(): void {
+    this.showTenantForm = false;
+    this.editingTenantId = null;
+    this.tenantFeedback = '';
+  }
+
+  saveTenant(): void {
+    if (!this.tenantForm.nombre.trim()) {
+      this.tenantFeedback = 'El nombre es obligatorio.';
+      return;
+    }
+    this.isSavingTenant = true;
+    this.tenantFeedback = '';
+    const body = { nombre: this.tenantForm.nombre.trim(), descripcion: this.tenantForm.descripcion.trim() || null, estado: this.tenantForm.estado };
+    const req = this.editingTenantId
+      ? this.http.put<TenantRecord>(`${this.tenantsApiUrl}/${this.editingTenantId}`, body, this.buildAuthRequestOptions())
+      : this.http.post<TenantRecord>(this.tenantsApiUrl, body, this.buildAuthRequestOptions());
+    req.subscribe({
+      next: () => {
+        this.isSavingTenant = false;
+        this.showTenantForm = false;
+        this.editingTenantId = null;
+        this.loadTenants();
+      },
+      error: (err) => {
+        this.isSavingTenant = false;
+        this.tenantFeedback = err?.error?.detail ?? 'Error al guardar la organización.';
+      },
+    });
+  }
+
+  toggleTenantEstado(tenant: TenantRecord): void {
+    if (tenant.id === 1) {
+      return;
+    }
+    const nuevoEstado = tenant.estado === 'activo' ? 'inactivo' : 'activo';
+    this.http.patch<TenantRecord>(`${this.tenantsApiUrl}/${tenant.id}/estado?estado=${nuevoEstado}`, {}, this.buildAuthRequestOptions()).subscribe({
+      next: () => this.loadTenants(),
+      error: (err) => { alert(err?.error?.detail ?? 'Error al cambiar el estado.'); },
+    });
+  }
+
+  deleteTenant(tenant: TenantRecord): void {
+    if (tenant.id === 1) {
+      return;
+    }
+    if (!window.confirm(`¿Eliminar la organización "${tenant.nombre}"? Esta acción no se puede deshacer.`)) {
+      return;
+    }
+    this.http.delete(`${this.tenantsApiUrl}/${tenant.id}`, this.buildAuthRequestOptions()).subscribe({
+      next: () => this.loadTenants(),
+      error: (err) => { alert(err?.error?.detail ?? 'Error al eliminar la organización.'); },
+    });
+  }
+
+  private authHeaders(): Record<string, string> {
+    const token = this.adminSession?.accessToken;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  private buildAuthRequestOptions(
+    params?: Record<string, string | number | null | undefined>,
+  ): {
+    headers?: Record<string, string>;
+    params?: Record<string, string>;
+  } {
+    const normalizedParams = Object.entries(params ?? {}).reduce<Record<string, string>>((acc, [key, value]) => {
+      if (value !== null && value !== undefined && value !== '') {
+        acc[key] = String(value);
+      }
+      return acc;
+    }, {});
+    const headers = this.authHeaders();
+
+    return {
+      ...(Object.keys(headers).length ? { headers } : {}),
+      ...(Object.keys(normalizedParams).length ? { params: normalizedParams } : {}),
+    };
+  }
+
+  // ── Workshops load ─────────────────────────────────────────────────────────
+
   loadWorkshops(): void {
     if (this.isWorkshopSession) {
       this.workshops = [];
@@ -4688,7 +7879,7 @@ export class DashboardPageComponent implements OnDestroy {
 
     this.isLoading = true;
 
-    this.http.get<WorkshopRegistration[]>(this.workshopsApiUrl).subscribe({
+    this.http.get<WorkshopRegistration[]>(this.workshopsApiUrl, this.buildAuthRequestOptions()).subscribe({
       next: (workshops) => {
         this.workshops = workshops;
         this.workshopsPage = 1;
@@ -4705,11 +7896,24 @@ export class DashboardPageComponent implements OnDestroy {
   }
 
   loadTechnicians(): void {
+    if (this.isGlobalAdminSession) {
+      this.technicians = [];
+      this.isTechniciansLoading = false;
+      this.refreshStats();
+      return;
+    }
+
+    if (this.isTenantSession && !this.sucursales.length) {
+      this.loadSucursales();
+    }
+
     this.isTechniciansLoading = true;
 
     this.http
       .get<Technician[]>(this.techniciansApiUrl, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
+        ...this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
       })
       .subscribe({
         next: (technicians) => {
@@ -4735,7 +7939,7 @@ export class DashboardPageComponent implements OnDestroy {
 
     this.isClientsLoading = true;
 
-    this.http.get<Client[]>(this.clientsApiUrl).subscribe({
+    this.http.get<Client[]>(this.clientsApiUrl, this.buildAuthRequestOptions()).subscribe({
       next: (clients) => {
         this.clients = clients;
         this.isClientsLoading = false;
@@ -4754,7 +7958,9 @@ export class DashboardPageComponent implements OnDestroy {
 
     this.http
       .get<DashboardOperationalOverview>(this.dashboardOverviewApiUrl, {
-        params: this.currentWorkshopId ? { workshop_id: this.currentWorkshopId } : {},
+        ...this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
       })
       .subscribe({
         next: (overview) => {
@@ -4776,7 +7982,7 @@ export class DashboardPageComponent implements OnDestroy {
     this.http
       .put<Client>(`${this.clientsApiUrl}/${client.id}/status`, {
         status: nextStatus,
-      })
+      }, this.buildAuthRequestOptions())
       .subscribe({
         next: () => {
           this.loadClients();
@@ -4837,7 +8043,7 @@ export class DashboardPageComponent implements OnDestroy {
     this.isSavingClient = true;
     this.clientEditFeedback = '';
 
-    this.http.put<Client>(`${this.clientsApiUrl}/${this.editingClientId}`, payload).subscribe({
+    this.http.put<Client>(`${this.clientsApiUrl}/${this.editingClientId}`, payload, this.buildAuthRequestOptions()).subscribe({
       next: () => {
         this.isSavingClient = false;
         this.cancelClientEdit();
@@ -4865,7 +8071,7 @@ export class DashboardPageComponent implements OnDestroy {
       return;
     }
 
-    this.http.delete(`${this.clientsApiUrl}/${this.clientPendingDelete.id}`).subscribe({
+    this.http.delete(`${this.clientsApiUrl}/${this.clientPendingDelete.id}`, this.buildAuthRequestOptions()).subscribe({
       next: () => {
         this.cancelClientDelete();
         this.loadClients();
@@ -4941,7 +8147,7 @@ export class DashboardPageComponent implements OnDestroy {
       if (stat.label === 'Tecnicos disponibles') {
         return {
           ...stat,
-          value: String(this.techniciansByStatus('disponible')),
+          value: String(this.activeTechniciansCount()),
           detail: this.technicians.length
             ? 'Estado actualizado segun el tecnico registrado en el panel.'
             : 'Aun no se registraron tecnicos en el sistema.',
@@ -5043,5 +8249,877 @@ export class DashboardPageComponent implements OnDestroy {
       return 'Verificar con el taller el motivo del rechazo. El cliente puede registrar una nueva solicitud desde la app móvil.';
     }
     return 'Contactar soporte técnico si el problema persiste.';
+  }
+
+  get quotationRequestsBadgeCount(): number {
+    return this.quotationRequests.filter((r) => r.status === 'abierto').length;
+  }
+
+  get quotationActiveOffersCount(): number {
+    return this.quotationOffers.filter((o) => o.status === 'enviada' || o.status === 'actualizada').length;
+  }
+
+  get contractedServicesBadgeCount(): number {
+    return this.contractedServices.filter((s) => s.emergency_status === 'solicitud_recibida' || s.emergency_status === 'en_revision').length;
+  }
+
+  loadQuotationRequests(): void {
+    if (this.isTenantQuotationSession) {
+      this.isQuotationRequestsLoading = true;
+      this.http.get<QuotationRequest[]>(
+        `${API_BASE_URL}/cotizaciones/tenant/solicitudes`,
+        this.buildAuthRequestOptions(),
+      ).subscribe({
+        next: (rows) => {
+          this.quotationRequests = rows;
+          this.isQuotationRequestsLoading = false;
+        },
+        error: () => {
+          this.quotationRequests = [];
+          this.isQuotationRequestsLoading = false;
+        },
+      });
+      return;
+    }
+
+    const workshopId = this.currentWorkshopId;
+    if (!workshopId) {
+      this.resolveWorkshopContext(() => this.loadQuotationRequests());
+      return;
+    }
+    this.isQuotationRequestsLoading = true;
+    this.http.get<QuotationRequest[]>(
+      `${API_BASE_URL}/cotizaciones/taller/${workshopId}`,
+      this.buildAuthRequestOptions(),
+    ).subscribe({
+      next: (rows) => {
+        this.quotationRequests = rows;
+        this.isQuotationRequestsLoading = false;
+        if (!rows.length && this.resolvedWorkshopId == null) {
+          this.resolveWorkshopContext(() => this.loadQuotationRequests(), true);
+        }
+      },
+      error: () => {
+        this.isQuotationRequestsLoading = false;
+      },
+    });
+  }
+
+  loadQuotationHistory(): void {
+    if (this.isTenantQuotationSession) {
+      this.isQuotationHistoryLoading = true;
+      this.http.get<QuotationOffer[]>(
+        `${API_BASE_URL}/cotizaciones/tenant/historial`,
+        this.buildAuthRequestOptions(),
+      ).subscribe({
+        next: (rows) => {
+          this.quotationOffers = rows;
+          this.isQuotationHistoryLoading = false;
+        },
+        error: () => {
+          this.quotationOffers = [];
+          this.isQuotationHistoryLoading = false;
+        },
+      });
+      return;
+    }
+
+    const workshopId = this.currentWorkshopId;
+    if (!workshopId) {
+      this.resolveWorkshopContext(() => this.loadQuotationHistory());
+      return;
+    }
+    this.isQuotationHistoryLoading = true;
+    this.http.get<QuotationOffer[]>(
+      `${API_BASE_URL}/cotizaciones/taller/${workshopId}/historial`,
+      this.buildAuthRequestOptions(),
+    ).subscribe({
+      next: (rows) => {
+        this.quotationOffers = rows;
+        this.isQuotationHistoryLoading = false;
+      },
+      error: () => {
+        this.isQuotationHistoryLoading = false;
+      },
+    });
+  }
+
+  loadContractedServices(): void {
+    if (this.isTenantQuotationSession) {
+      this.isContractedServicesLoading = true;
+      this.http.get<ContractedService[]>(
+        `${API_BASE_URL}/cotizaciones/tenant/servicios-contratados`,
+        this.buildAuthRequestOptions(),
+      ).subscribe({
+        next: (rows) => {
+          this.contractedServices = rows;
+          this.isContractedServicesLoading = false;
+          if (this.selectedContractedService) {
+            const updated = rows.find((s) => s.id === this.selectedContractedService!.id);
+            if (updated) this.selectedContractedService = updated;
+          }
+        },
+        error: () => {
+          this.contractedServices = [];
+          this.isContractedServicesLoading = false;
+        },
+      });
+      return;
+    }
+
+    const workshopId = this.currentWorkshopId;
+    if (!workshopId) {
+      this.resolveWorkshopContext(() => this.loadContractedServices());
+      return;
+    }
+    this.isContractedServicesLoading = true;
+    this.http.get<ContractedService[]>(
+      `${API_BASE_URL}/cotizaciones/taller/${workshopId}/servicios-contratados`,
+      this.buildAuthRequestOptions(),
+    ).subscribe({
+      next: (rows) => {
+        this.contractedServices = rows;
+        this.isContractedServicesLoading = false;
+        if (this.selectedContractedService) {
+          const updated = rows.find((s) => s.id === this.selectedContractedService!.id);
+          if (updated) this.selectedContractedService = updated;
+        }
+      },
+      error: () => {
+        this.isContractedServicesLoading = false;
+      },
+    });
+  }
+
+  get contractedServiceAssignableTechnicians(): Technician[] {
+    return this.technicians.filter((t) => t.status === 'disponible');
+  }
+
+  openContractedServiceDetail(service: ContractedService): void {
+    this.selectedContractedService = service;
+    this.contractedServicesView = 'detail';
+    this.selectedContractedTechnicianId = null;
+    this.contractedAssignmentFeedback = '';
+    this.loadTechnicians();
+  }
+
+  closeContractedServiceDetail(): void {
+    this.selectedContractedService = null;
+    this.contractedServicesView = 'list';
+    this.contractedAssignmentFeedback = '';
+  }
+
+  acceptContractedEmergency(): void {
+    const svc = this.selectedContractedService;
+    if (!svc?.emergency_id || this.isUpdatingContractedStatus) return;
+    if (!this.currentWorkshopId) return;
+    this.isUpdatingContractedStatus = true;
+    this.contractedAssignmentFeedback = '';
+    this.http
+      .put<EmergencyReport>(
+        `${this.emergenciesApiUrl}/${svc.emergency_id}/status`,
+        { emergency_status: 'activo' },
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
+      )
+      .subscribe({
+        next: (report) => {
+          this.isUpdatingContractedStatus = false;
+          this.contractedAssignmentFeedback = 'Emergencia aceptada. Selecciona un técnico para asignar.';
+          const updated = { ...svc, emergency_status: report.emergency_status ?? 'activo' };
+          this.selectedContractedService = updated;
+          this.contractedServices = this.contractedServices.map((s) => s.id === svc.id ? updated : s);
+        },
+        error: () => {
+          this.isUpdatingContractedStatus = false;
+          this.contractedAssignmentFeedback = 'No se pudo cambiar el estado de la emergencia.';
+        },
+      });
+  }
+
+  assignContractedTechnician(): void {
+    const svc = this.selectedContractedService;
+    if (!svc?.emergency_id || !this.selectedContractedTechnicianId || this.isAssigningContractedTechnician) return;
+    if (!this.currentWorkshopId) return;
+    this.isAssigningContractedTechnician = true;
+    this.contractedAssignmentFeedback = '';
+    this.http
+      .put<EmergencyReport>(
+        `${this.emergenciesApiUrl}/${svc.emergency_id}/technician-assignment`,
+        { technician_id: this.selectedContractedTechnicianId },
+        this.buildAuthRequestOptions({
+          workshop_id: this.currentWorkshopId,
+        }),
+      )
+      .subscribe({
+        next: (report) => {
+          this.isAssigningContractedTechnician = false;
+          const techName = report.assigned_technician_name ?? 'Técnico';
+          this.contractedAssignmentFeedback = `✓ Técnico "${techName}" asignado correctamente.`;
+          const updated = {
+            ...svc,
+            emergency_status: report.emergency_status ?? svc.emergency_status,
+          };
+          this.selectedContractedService = updated;
+          this.contractedServices = this.contractedServices.map((s) => s.id === svc.id ? updated : s);
+          this.loadTechnicians();
+        },
+        error: (err) => {
+          this.isAssigningContractedTechnician = false;
+          const detail: string = err?.error?.detail ?? '';
+          this.contractedAssignmentFeedback = detail
+            ? `No se pudo asignar: ${detail}`
+            : 'No se pudo asignar el técnico. Verifica que esté disponible.';
+          this.loadTechnicians();
+        },
+      });
+  }
+
+  contractedServiceEmergencyStatusLabel(status: string | null): string {
+    const labels: Record<string, string> = {
+      solicitud_recibida: 'Solicitud recibida',
+      en_revision: 'En revisión',
+      auxilio_asignado: 'Auxilio asignado',
+      auxilio_en_camino: 'En camino',
+      tecnico_en_sitio: 'Técnico en sitio',
+      servicio_en_proceso: 'En atención',
+      servicio_finalizado: 'Finalizado',
+      solicitud_cancelada: 'Cancelada',
+      rechazado: 'Rechazada',
+    };
+    return status ? (labels[status] ?? status) : '—';
+  }
+
+  openQuotationDetail(req: QuotationRequest): void {
+    const workshopId = this.currentWorkshopId;
+    this.selectedQuotationRequest = req;
+    this.selectedWorkshopOffer = null;
+    this.selectedQuotationOffers = [];
+    this.quotationView = 'detail';
+    this.selectedQuotationEmergency = null;
+    this.quotationEmergencyPhotoUrls = [];
+    this.quotationEmergencyAudioUrl = null;
+    this.quotationEmergencyMapEmbedUrl = null;
+    this.quotationEmergencyMapExternalUrl = null;
+
+    if (req.emergency_id) {
+      this.isQuotationEmergencyLoading = true;
+      this.http.get<EmergencyReport>(
+        `${API_BASE_URL}/emergencias/${req.emergency_id}`,
+        this.buildAuthRequestOptions(),
+      ).subscribe({
+        next: (report) => {
+          this.selectedQuotationEmergency = report;
+          this.quotationEmergencyPhotoUrls = this.getEmergencyPhotoUrls(report);
+          this.quotationEmergencyAudioUrl = this.normalizeBackendAssetUrl(report.audio_url);
+          this.quotationEmergencyMapEmbedUrl = this.buildEmergencyMapEmbedUrl(report.latitude, report.longitude);
+          this.quotationEmergencyMapExternalUrl = this.buildEmergencyMapExternalUrl(report.latitude, report.longitude);
+          this.isQuotationEmergencyLoading = false;
+        },
+        error: () => {
+          this.isQuotationEmergencyLoading = false;
+        },
+      });
+    }
+
+    if (this.isTenantQuotationSession || workshopId) {
+      this.http.get<QuotationOffer[]>(
+        `${API_BASE_URL}/cotizaciones/${req.id}/propuestas`,
+        this.buildAuthRequestOptions(),
+      ).subscribe({
+        next: (offers) => {
+          this.selectedQuotationOffers = offers;
+          this.selectedWorkshopOffer = offers.find((offer) => offer.workshop_id === workshopId) ?? null;
+        },
+        error: () => {
+          this.selectedQuotationOffers = [];
+          this.selectedWorkshopOffer = null;
+        },
+      });
+    }
+  }
+
+  get maxValidityDays(): number {
+    const expiresAt = this.selectedQuotationRequest?.expires_at;
+    if (!expiresAt) return 365;
+    const remaining = Math.floor((new Date(expiresAt).getTime() - Date.now()) / 86_400_000);
+    return Math.max(1, remaining);
+  }
+
+  openQuotationOfferForm(): void {
+    this.quotationOfferForm = this.selectedWorkshopOffer
+      ? this.createQuotationOfferFormFromOffer(this.selectedWorkshopOffer)
+      : this.createEmptyQuotationOfferForm();
+    const max = this.maxValidityDays;
+    if ((this.quotationOfferForm.validity_days ?? 3) > max) {
+      this.quotationOfferForm.validity_days = max;
+    }
+    this.quotationOfferFeedback = '';
+    this.quotationView = 'offer_form';
+  }
+
+  submitQuotationOffer(): void {
+    const req = this.selectedQuotationRequest;
+    const workshopId = this.currentWorkshopId;
+    if (!req || !workshopId) return;
+
+    const price = this.quotationOfferForm.price;
+    if (price === null || price === undefined || price < 0) {
+      this.quotationOfferFeedback = 'El precio es requerido y debe ser mayor o igual a 0.';
+      return;
+    }
+
+    const desc = this.quotationOfferForm.service_description.trim();
+    if (desc.length < 3) {
+      this.quotationOfferFeedback = 'La descripción del servicio es requerida (mínimo 3 caracteres).';
+      return;
+    }
+
+    this.isSubmittingOffer = true;
+    this.quotationOfferFeedback = '';
+
+    const payload = {
+      workshop_id: workshopId,
+      price,
+      service_description: desc,
+      spare_parts: this.quotationOfferForm.spare_parts.trim() || null,
+      labor_detail: this.quotationOfferForm.labor_detail.trim() || null,
+      labor_cost: this.quotationOfferForm.labor_cost,
+      spare_parts_cost: this.quotationOfferForm.spare_parts_cost,
+      estimated_service_time: this.quotationOfferForm.estimated_service_time.trim() || null,
+      estimated_arrival_time: this.quotationOfferForm.estimated_arrival_time.trim() || null,
+      warranty: this.quotationOfferForm.warranty.trim() || null,
+      validity_days: this.quotationOfferForm.validity_days ?? 3,
+      observations: this.quotationOfferForm.observations.trim() || null,
+      condiciones_servicio: this.quotationOfferForm.condiciones_servicio.trim() || null,
+    };
+
+    const request$ = this.selectedWorkshopOffer
+      ? this.http.put<QuotationOffer>(
+          `${API_BASE_URL}/cotizaciones/${req.id}/propuestas/${this.selectedWorkshopOffer.id}`,
+          payload,
+          this.buildAuthRequestOptions(),
+        )
+      : this.http.post<QuotationOffer>(
+          `${API_BASE_URL}/cotizaciones/${req.id}/propuestas`,
+          payload,
+          this.buildAuthRequestOptions(),
+        );
+
+    request$.subscribe({
+      next: (offer) => {
+        this.lastSubmittedOffer = offer;
+        this.selectedWorkshopOffer = offer;
+        this.isSubmittingOffer = false;
+        this.quotationView = 'confirmation';
+        this.loadQuotationRequests();
+        this.loadQuotationHistory();
+      },
+      error: (err: { error?: { detail?: unknown } }) => {
+        this.isSubmittingOffer = false;
+        const detail = err?.error?.detail;
+        this.quotationOfferFeedback = typeof detail === 'string' ? detail : 'Error al enviar la cotización. Intente nuevamente.';
+      },
+    });
+  }
+
+  resetQuotationView(): void {
+    this.quotationView = 'list';
+    this.selectedQuotationRequest = null;
+    this.selectedQuotationEmergency = null;
+    this.quotationEmergencyPhotoUrls = [];
+    this.quotationEmergencyAudioUrl = null;
+    this.quotationEmergencyMapEmbedUrl = null;
+    this.quotationEmergencyMapExternalUrl = null;
+    this.lastSubmittedOffer = null;
+    this.selectedWorkshopOffer = null;
+    this.selectedQuotationOffers = [];
+    this.quotationOfferFeedback = '';
+  }
+
+  private createEmptyQuotationOfferForm(): QuotationOfferFormModel {
+    return {
+      price: null,
+      service_description: '',
+      spare_parts: '',
+      labor_detail: '',
+      labor_cost: null,
+      spare_parts_cost: null,
+      estimated_service_time: '',
+      estimated_arrival_time: '',
+      warranty: '',
+      validity_days: 3,
+      observations: '',
+      condiciones_servicio: '',
+    };
+  }
+
+  private createQuotationOfferFormFromOffer(offer: QuotationOffer): QuotationOfferFormModel {
+    return {
+      price: offer.price ?? null,
+      service_description: offer.service_description ?? '',
+      spare_parts: offer.spare_parts ?? '',
+      labor_detail: offer.labor_detail ?? '',
+      labor_cost: offer.labor_cost ?? null,
+      spare_parts_cost: offer.spare_parts_cost ?? null,
+      estimated_service_time: offer.estimated_service_time ?? '',
+      estimated_arrival_time: offer.estimated_arrival_time ?? '',
+      warranty: offer.warranty ?? '',
+      validity_days: offer.validity_days ?? 3,
+      observations: offer.observations ?? '',
+      condiciones_servicio: offer.condiciones_servicio ?? '',
+    };
+  }
+
+  quotationRequestStateLabel(req: QuotationRequest): string {
+    if (req.status === 'expirado') return 'Cotización vencida';
+    if (req.status === 'seleccionado') return 'Cotización aceptada';
+    return 'Cotización solicitada';
+  }
+
+  quotationInvitationStateLabel(req: QuotationRequest): string {
+    if (req.workshop_invitation_status === 'respondido') return 'Cotización enviada';
+    return 'Pendiente de respuesta';
+  }
+
+  quotationOfferStateLabel(offer: QuotationOffer): string {
+    if (offer.status === 'enviada') return 'Cotización enviada';
+    if (offer.status === 'actualizada') return 'Cotización actualizada';
+    if (offer.status === 'aceptada') return 'Cotización aceptada';
+    if (offer.status === 'rechazada') return 'Cotización rechazada';
+    if (offer.status === 'expirado') return 'Cotización vencida';
+    return offer.status;
+  }
+
+  // ── SUCURSALES ────────────────────────────────────────────────────────────
+
+  loadSucursales(): void {
+    this.isSucursalesLoading = true;
+    this.sucursalesFeedback = '';
+    this.http
+      .get<SucursalRecord[]>(`${API_BASE_URL}/sucursales`, { headers: this.tenantAuthHeaders })
+      .subscribe({
+        next: (data) => {
+          this.sucursales = data;
+          this.isSucursalesLoading = false;
+          this.refreshSucursalesOverviewMap();
+        },
+        error: (err: { error?: { detail?: unknown } }) => {
+          this.isSucursalesLoading = false;
+          this.refreshSucursalesOverviewMap();
+          const detail = err?.error?.detail;
+          this.sucursalesFeedback = typeof detail === 'string' ? detail : 'Error al cargar sucursales.';
+        },
+      });
+  }
+
+  openNuevaSucursal(): void {
+    if (!this.isSuperadminTenant) {
+      return;
+    }
+    this.destroySucursalMap();
+    this.editingSucursalId = null;
+    this.sucursalForm = this.createEmptySucursalForm();
+    this.sucursalesFeedback = '';
+    this.resetSucursalLocationState();
+    this.showSucursalForm = true;
+  }
+
+  editSucursal(suc: SucursalRecord): void {
+    if (!this.isSuperadminTenant) {
+      return;
+    }
+    this.destroySucursalMap();
+    this.editingSucursalId = suc.id;
+    this.sucursalForm = {
+      nombre: suc.nombre,
+      direccion: suc.direccion ?? '',
+      zona: this.normalizeSucursalZoneValue(suc.zona),
+      ciudad: suc.ciudad,
+      latitud: suc.latitud ?? SANTA_CRUZ_DEFAULT_COORDINATES.latitud,
+      longitud: suc.longitud ?? SANTA_CRUZ_DEFAULT_COORDINATES.longitud,
+      telefono: suc.telefono ?? '',
+      responsable: suc.responsable ?? '',
+      especialidades: [...(suc.especialidades?.length ? suc.especialidades : suc.workshop_specialty ? [suc.workshop_specialty] : [])],
+    };
+    this.sucursalesFeedback = '';
+    this.resetSucursalLocationState();
+    this.sucursalDetectedAddress = this.sucursalForm.direccion.trim();
+    this.sucursalLastAutofilledAddress = this.sucursalForm.direccion.trim();
+    this.showSucursalForm = true;
+  }
+
+  cancelSucursalForm(): void {
+    this.destroySucursalMap();
+    this.showSucursalForm = false;
+    this.editingSucursalId = null;
+    this.sucursalesFeedback = '';
+    this.resetSucursalLocationState();
+  }
+
+  handleSucursalAddressManualInput(): void {
+    const currentValue = this.sucursalForm.direccion.trim();
+    this.sucursalAddressTouchedManually =
+      currentValue.length > 0 && currentValue !== this.sucursalLastAutofilledAddress;
+  }
+
+  get canApplySucursalDetectedAddress(): boolean {
+    return (
+      !!this.sucursalDetectedAddress &&
+      this.sucursalAddressTouchedManually &&
+      this.sucursalForm.direccion.trim() !== this.sucursalDetectedAddress
+    );
+  }
+
+  applySucursalDetectedAddress(): void {
+    if (!this.sucursalDetectedAddress) {
+      return;
+    }
+
+    this.sucursalForm = {
+      ...this.sucursalForm,
+      direccion: this.sucursalDetectedAddress,
+    };
+    this.sucursalLastAutofilledAddress = this.sucursalDetectedAddress;
+    this.sucursalAddressTouchedManually = false;
+    this.sucursalLocationMessage = '';
+  }
+
+  locateSucursalCurrentPosition(): void {
+    this.sucursalLocationMessage = '';
+
+    if (!this.isSecureContext) {
+      this.sucursalLocationMessage =
+        'La ubicación automática del navegador solo funciona en HTTPS o en localhost. Usa el mapa manualmente o abre el sitio con HTTPS.';
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      this.sucursalLocationMessage = 'Tu navegador no soporta geolocalización.';
+      return;
+    }
+
+    this.isSucursalLocationLocating = true;
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
+        this.updateSucursalSelectedLocation(latitude, longitude);
+        this.renderSucursalMap(true);
+        this.isSucursalLocationLocating = false;
+      },
+      () => {
+        this.isSucursalLocationLocating = false;
+        this.sucursalLocationMessage =
+          'No se pudo obtener tu ubicación actual. Revisa los permisos del navegador.';
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      },
+    );
+  }
+
+  saveSucursal(): void {
+    if (!this.isSuperadminTenant) {
+      return;
+    }
+    if (!this.sucursalForm.nombre.trim()) {
+      this.sucursalesFeedback = 'El nombre de la sucursal es obligatorio.';
+      return;
+    }
+    if (!this.sucursalForm.zona.trim()) {
+      this.sucursalesFeedback = 'Debes seleccionar una zona.';
+      return;
+    }
+    if (!this.sucursalForm.especialidades.length) {
+      this.sucursalesFeedback = 'Selecciona al menos una especialidad.';
+      return;
+    }
+    const body = {
+      nombre: this.sucursalForm.nombre.trim(),
+      direccion: this.sucursalForm.direccion.trim() || null,
+      zona: this.sucursalForm.zona.trim(),
+      ciudad: this.sucursalForm.ciudad.trim() || 'Santa Cruz',
+      latitud: this.sucursalForm.latitud,
+      longitud: this.sucursalForm.longitud,
+      telefono: this.sucursalForm.telefono.trim() || null,
+      responsable: this.sucursalForm.responsable.trim() || null,
+      especialidades: [...this.sucursalForm.especialidades],
+    };
+    const headers = this.tenantAuthHeaders;
+    const req$ = this.editingSucursalId
+      ? this.http.put<SucursalRecord>(`${API_BASE_URL}/sucursales/${this.editingSucursalId}`, body, { headers })
+      : this.http.post<SucursalRecord>(`${API_BASE_URL}/sucursales`, body, { headers });
+
+    req$.subscribe({
+      next: () => {
+        this.sucursalesFeedback = this.editingSucursalId ? 'Sucursal actualizada.' : 'Sucursal creada.';
+        this.cancelSucursalForm();
+        this.loadSucursales();
+      },
+      error: (err: { error?: { detail?: unknown } }) => {
+        const detail = err?.error?.detail;
+        this.sucursalesFeedback = typeof detail === 'string' ? detail : 'Error al guardar la sucursal.';
+      },
+    });
+  }
+
+  deleteSucursal(id: number): void {
+    if (!this.isSuperadminTenant) return;
+    if (!window.confirm('¿Eliminar esta sucursal? Esta acción no se puede deshacer.')) return;
+    this.http
+      .delete<void>(`${API_BASE_URL}/sucursales/${id}`, { headers: this.tenantAuthHeaders })
+      .subscribe({
+        next: () => this.loadSucursales(),
+        error: (err: { error?: { detail?: unknown } }) => {
+          const detail = err?.error?.detail;
+          this.sucursalesFeedback = typeof detail === 'string' ? detail : 'Error al eliminar la sucursal.';
+        },
+      });
+  }
+
+  // ── USUARIOS DE LA EMPRESA ────────────────────────────────────────────────
+
+  loadUsuariosEmpresa(): void {
+    this.isUsuariosEmpresaLoading = true;
+    this.usuariosEmpresaFeedback = '';
+    this.http
+      .get<UsuarioEmpresaRecord[]>(`${API_BASE_URL}/tenant/usuarios`, { headers: this.tenantAuthHeaders })
+      .subscribe({
+        next: (data) => {
+          this.usuariosEmpresa = data;
+          this.isUsuariosEmpresaLoading = false;
+        },
+        error: (err: { error?: { detail?: unknown } }) => {
+          this.isUsuariosEmpresaLoading = false;
+          const detail = err?.error?.detail;
+          this.usuariosEmpresaFeedback = typeof detail === 'string' ? detail : 'Error al cargar usuarios.';
+        },
+      });
+  }
+
+  openNuevoUsuarioEmpresa(): void {
+    if (!this.isSuperadminTenant) {
+      return;
+    }
+    this.editingUsuarioEmpresaId = null;
+    this.usuarioEmpresaForm = this.createEmptyUsuarioEmpresaForm();
+    this.usuarioEmpresaNameTouchedManually = false;
+    this.usuarioEmpresaEmailTouchedManually = false;
+    this.usuariosEmpresaFeedback = '';
+    this.showUsuarioEmpresaForm = true;
+  }
+
+  editUsuarioEmpresa(usr: UsuarioEmpresaRecord): void {
+    if (!this.isSuperadminTenant) {
+      return;
+    }
+    this.editingUsuarioEmpresaId = usr.id;
+    this.usuarioEmpresaForm = {
+      email: usr.email,
+      full_name: usr.full_name,
+      phone: usr.phone ?? '',
+      password: '',
+      role: usr.role,
+      sucursal_id: usr.sucursal_id ?? null,
+    };
+    this.usuarioEmpresaNameTouchedManually = true;
+    this.usuarioEmpresaEmailTouchedManually = true;
+    this.usuariosEmpresaFeedback = '';
+    this.showUsuarioEmpresaForm = true;
+  }
+
+  cancelUsuarioEmpresaForm(): void {
+    this.showUsuarioEmpresaForm = false;
+    this.editingUsuarioEmpresaId = null;
+    this.usuarioEmpresaForm = this.createEmptyUsuarioEmpresaForm();
+    this.usuarioEmpresaNameTouchedManually = false;
+    this.usuarioEmpresaEmailTouchedManually = false;
+    this.usuariosEmpresaFeedback = '';
+  }
+
+  handleUsuarioEmpresaNameInput(): void {
+    this.usuarioEmpresaNameTouchedManually = true;
+  }
+
+  handleUsuarioEmpresaEmailInput(): void {
+    this.usuarioEmpresaEmailTouchedManually = true;
+  }
+
+  handleUsuarioEmpresaRoleChange(): void {
+    if (this.usuarioEmpresaForm.role !== 'ADMIN_SUCURSAL') {
+      return;
+    }
+    this.applyUsuarioEmpresaSucursalSuggestions();
+  }
+
+  handleUsuarioEmpresaSucursalChange(): void {
+    this.applyUsuarioEmpresaSucursalSuggestions();
+  }
+
+  usuarioEmpresaSucursalName(sucursalId: number | null): string {
+    if (sucursalId === null) {
+      return '—';
+    }
+
+    return this.sucursales.find((sucursal) => sucursal.id === sucursalId)?.nombre ?? `Sucursal #${sucursalId}`;
+  }
+
+  private applyUsuarioEmpresaSucursalSuggestions(): void {
+    if (this.usuarioEmpresaForm.role !== 'ADMIN_SUCURSAL') {
+      return;
+    }
+
+    const sucursal = this.sucursales.find((item) => item.id === this.usuarioEmpresaForm.sucursal_id);
+    if (!sucursal) {
+      return;
+    }
+
+    const suggestedName = (sucursal.responsable || '').trim();
+    const suggestedEmail = this.buildUsuarioEmpresaSuggestedEmail(suggestedName);
+
+    if (suggestedName && !this.usuarioEmpresaNameTouchedManually) {
+      this.usuarioEmpresaForm = {
+        ...this.usuarioEmpresaForm,
+        full_name: suggestedName,
+      };
+    }
+
+    if (suggestedEmail && !this.usuarioEmpresaEmailTouchedManually && !this.editingUsuarioEmpresaId) {
+      this.usuarioEmpresaForm = {
+        ...this.usuarioEmpresaForm,
+        email: suggestedEmail,
+      };
+    }
+  }
+
+  private buildUsuarioEmpresaSuggestedEmail(fullName: string): string {
+    const local = this.slugifyForEmail(fullName).replaceAll('.', ' ').trim().replace(/\s+/g, '.');
+    if (!local) {
+      return '';
+    }
+
+    const tenantSlug = this.slugifyForEmail(this.adminSession?.tenantSlug || '');
+    const tenantDomain = tenantSlug.replaceAll('.', '');
+    const domain = tenantDomain || 'empresa.com';
+
+    return `${local}@${domain.includes('.') ? domain : `${domain}.com`}`;
+  }
+
+  private slugifyForEmail(value: string): string {
+    return value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/ñ/gi, 'n')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s.-]/g, '')
+      .replace(/\s+/g, '.')
+      .replace(/\.+/g, '.')
+      .replace(/^\.+|\.+$/g, '');
+  }
+
+  saveUsuarioEmpresa(): void {
+    if (!this.isSuperadminTenant) {
+      return;
+    }
+    if (!this.usuarioEmpresaForm.full_name.trim()) {
+      this.usuariosEmpresaFeedback = 'El nombre completo es obligatorio.';
+      return;
+    }
+    if (!this.editingUsuarioEmpresaId && !this.usuarioEmpresaForm.email.trim()) {
+      this.usuariosEmpresaFeedback = 'El correo es obligatorio.';
+      return;
+    }
+    if (this.editingUsuarioEmpresaId && !this.usuarioEmpresaForm.email.trim()) {
+      this.usuariosEmpresaFeedback = 'El correo es obligatorio.';
+      return;
+    }
+    if (!this.editingUsuarioEmpresaId && this.usuarioEmpresaForm.password.trim().length < 6) {
+      this.usuariosEmpresaFeedback = 'La contraseña debe tener al menos 6 caracteres.';
+      return;
+    }
+    if (this.usuarioEmpresaForm.role === 'ADMIN_SUCURSAL' && !this.usuarioEmpresaForm.sucursal_id) {
+      this.usuariosEmpresaFeedback = 'Selecciona la sucursal que administrará este usuario.';
+      return;
+    }
+    const headers = this.tenantAuthHeaders;
+    const body: Record<string, unknown> = {
+      full_name: this.usuarioEmpresaForm.full_name.trim(),
+      phone: this.usuarioEmpresaForm.phone.trim(),
+      role: this.usuarioEmpresaForm.role,
+      sucursal_id: this.usuarioEmpresaForm.sucursal_id ?? null,
+    };
+    if (!this.editingUsuarioEmpresaId) {
+      body['email'] = this.usuarioEmpresaForm.email.trim().toLowerCase();
+      body['password'] = this.usuarioEmpresaForm.password;
+    }
+
+    const req$ = this.editingUsuarioEmpresaId
+      ? this.http.put<UsuarioEmpresaRecord>(`${API_BASE_URL}/tenant/usuarios/${this.editingUsuarioEmpresaId}`, body, { headers })
+      : this.http.post<UsuarioEmpresaRecord>(`${API_BASE_URL}/tenant/usuarios`, body, { headers });
+
+    req$.subscribe({
+      next: () => {
+        this.usuariosEmpresaFeedback = this.editingUsuarioEmpresaId ? 'Usuario actualizado.' : 'Usuario creado.';
+        this.cancelUsuarioEmpresaForm();
+        this.loadUsuariosEmpresa();
+      },
+      error: (err: { error?: { detail?: unknown } }) => {
+        const detail = err?.error?.detail;
+        this.usuariosEmpresaFeedback = typeof detail === 'string' ? detail : 'Error al guardar el usuario.';
+      },
+    });
+  }
+
+  deleteUsuarioEmpresa(id: number): void {
+    if (!this.isSuperadminTenant) return;
+    if (!window.confirm('¿Eliminar este usuario? Esta acción no se puede deshacer.')) return;
+    this.http
+      .delete<void>(`${API_BASE_URL}/tenant/usuarios/${id}`, { headers: this.tenantAuthHeaders })
+      .subscribe({
+        next: () => this.loadUsuariosEmpresa(),
+        error: (err: { error?: { detail?: unknown } }) => {
+          const detail = err?.error?.detail;
+          this.usuariosEmpresaFeedback = typeof detail === 'string' ? detail : 'Error al eliminar el usuario.';
+        },
+      });
+  }
+
+  private resolveWorkshopContext(onResolved?: () => void, force = false): void {
+    if (!this.isWorkshopSession || (!this.adminSession?.email && !this.adminSession?.fullName)) {
+      return;
+    }
+
+    if (this.isResolvingWorkshopContext) {
+      return;
+    }
+
+    if (!force && this.resolvedWorkshopId != null) {
+      onResolved?.();
+      return;
+    }
+
+    this.isResolvingWorkshopContext = true;
+    this.http.get<WorkshopRegistration[]>(this.workshopsApiUrl, this.buildAuthRequestOptions()).subscribe({
+      next: (workshops) => {
+        const normalizedEmail = this.adminSession?.email.trim().toLowerCase();
+        const normalizedName = this.adminSession?.fullName.trim().toLowerCase();
+        const matched = workshops.find(
+          (workshop) =>
+            workshop.email.trim().toLowerCase() === normalizedEmail ||
+            workshop.workshop_name.trim().toLowerCase() === normalizedName,
+        );
+        this.resolvedWorkshopId = matched?.id ?? this.adminSession?.id ?? null;
+        this.isResolvingWorkshopContext = false;
+        onResolved?.();
+      },
+      error: () => {
+        this.isResolvingWorkshopContext = false;
+      },
+    });
   }
 }

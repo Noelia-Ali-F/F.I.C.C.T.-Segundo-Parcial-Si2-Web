@@ -1,10 +1,13 @@
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.utils import (
+    TokenPayload,
+    get_current_user_optional,
+    get_tenant_id_for_query,
     hash_password,
     is_protected_admin_email,
     is_protected_admin_role,
@@ -16,6 +19,7 @@ from app.db import (
     delete_client,
     get_client_by_email,
     list_clients,
+    list_clients_by_tenant,
     update_client,
     update_client_password,
     update_client_status,
@@ -179,6 +183,7 @@ def register_client_service(payload: ClientRegistrationCreate) -> ClientRegistra
                 "role": payload.role,
                 "status": "active",
                 "accepted_terms": payload.accepted_terms,
+                "tenant_id": 1,
             }
         )
     except IntegrityError as exc:
@@ -193,8 +198,9 @@ def register_client_service(payload: ClientRegistrationCreate) -> ClientRegistra
 Aqui esta la logica de listado de clientes que obtiene
 todos los clientes registrados para mostrarlos en el sistema.
 """
-def get_clients_service() -> list[ClientRegistrationResponse]:
-    return [ClientRegistrationResponse.model_validate(row) for row in list_clients()]
+def get_clients_service(tenant_id: int | None = None) -> list[ClientRegistrationResponse]:
+    rows = list_clients_by_tenant(tenant_id) if tenant_id is not None else list_clients()
+    return [ClientRegistrationResponse.model_validate(row) for row in rows]
 
 
 """
@@ -319,8 +325,11 @@ def register_client(payload: ClientRegistrationCreate) -> ClientRegistrationResp
 
 @router.get(f"{settings.api_prefix}/clientes", response_model=list[ClientRegistrationResponse])
 # Aqui esta el controlador GET de listado de clientes que obtiene todos los clientes registrados.
-def get_clients() -> list[ClientRegistrationResponse]:
-    return get_clients_service()
+def get_clients(
+    current_user: TokenPayload | None = Depends(get_current_user_optional),
+) -> list[ClientRegistrationResponse]:
+    tenant_id = get_tenant_id_for_query(current_user)
+    return get_clients_service(tenant_id)
 
 
 @router.post(f"{settings.api_prefix}/clientes/change-password")

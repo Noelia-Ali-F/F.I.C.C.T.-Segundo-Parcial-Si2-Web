@@ -1,6 +1,6 @@
 import { inject } from '@angular/core';
 import { CanActivateFn, Router } from '@angular/router';
-import { APP_SESSION_STORAGE_KEY, clearStoredSession, parseStoredSession } from './session';
+import { APP_SESSION_STORAGE_KEY, clearStoredSession, normalizeRole, parseStoredSession } from './session';
 
 export const authGuard: CanActivateFn = () => {
   const router = inject(Router);
@@ -10,7 +10,7 @@ export const authGuard: CanActivateFn = () => {
 
   const session = parseStoredSession(rawSession);
 
-  if (session) {
+  if (session && normalizeRole(session.role)) {
     return true;
   }
 

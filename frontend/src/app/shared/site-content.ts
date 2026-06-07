@@ -80,7 +80,7 @@ export const faqItems: FeatureCard[] = [
 export const sectionContent: Record<string, SectionContent> = {
   servicios: {
     eyebrow: 'Servicios',
-    title: 'Soluciones para el socio y su familia',
+    title: 'Soluciones para empresas, talleres y sus clientes',
     intro:
       'Este bloque reúne los servicios de mayor valor práctico, manteniendo la lógica del sitio de referencia pero con una presentación más ordenada y moderna.',
     lead:

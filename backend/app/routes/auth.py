@@ -7,7 +7,12 @@ from app.utils import (
     PROTECTED_ADMIN_EMAIL,
     PROTECTED_ADMIN_ID,
     PROTECTED_ADMIN_ROLE,
+    ROLE_CLIENTE,
+    ROLE_TECNICO,
+    ROLE_SUPERADMIN_GLOBAL,
     WORKSHOP_ROLE,
+    TENANT_ROLES,
+    create_access_token,
     ensure_login_not_locked,
     hash_password,
     is_protected_admin_email,
@@ -40,7 +45,8 @@ router = APIRouter(tags=["auth"])
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=255)
-    account_type: str | None = Field(default=None, pattern="^(admin|workshop|client)$")
+    # account_type ahora admite también 'tenant' para usuarios de empresa registrada
+    account_type: str | None = Field(default=None, pattern="^(admin|workshop|client|tenant)$")
 
 
 class AccountTypeLookupRequest(BaseModel):
@@ -58,6 +64,9 @@ class LoginResponse(BaseModel):
     phone: str | None = None
     role: str
     status: str
+    tenant_id: int | None = None
+    tenant_slug: str | None = None
+    sucursal_id: int | None = None
     requires_password_change: bool = False
     access_token: str | None = None
     token_type: str | None = None
@@ -104,10 +113,11 @@ def login_service(payload: LoginRequest) -> LoginResponse:
             email=PROTECTED_ADMIN_EMAIL,
             full_name=settings.protected_admin_full_name,
             phone=settings.protected_admin_phone,
-            role=PROTECTED_ADMIN_ROLE,
+            role=ROLE_SUPERADMIN_GLOBAL,
             status="active",
+            tenant_id=None,
             requires_password_change=False,
-            access_token=secrets.token_urlsafe(32),
+            access_token=create_access_token(PROTECTED_ADMIN_ID, ROLE_SUPERADMIN_GLOBAL, None),
             token_type="Bearer",
         )
 
@@ -131,11 +141,13 @@ def login_service(payload: LoginRequest) -> LoginResponse:
             register_failed_login_attempt(WORKSHOP_ROLE, normalized_email)
         if uses_initial_password or accepts_missing_initial_password:
             reset_login_attempts(WORKSHOP_ROLE, normalized_email)
+            workshop_tenant_id = int(workshop["tenant_id"]) if workshop.get("tenant_id") is not None else 1
             return LoginResponse(
                 id=int(workshop["id"]),
                 email=str(workshop["email"]),
                 role=WORKSHOP_ROLE,
                 status=workshop_login_status(workshop["approval_status"]),
+                tenant_id=workshop_tenant_id,
                 requires_password_change=True,
             )
         if workshop["approval_status"] != "activo":
@@ -144,6 +156,7 @@ def login_service(payload: LoginRequest) -> LoginResponse:
                 detail="El taller todavía no fue habilitado por el administrador",
             )
         reset_login_attempts(WORKSHOP_ROLE, normalized_email)
+        workshop_tenant_id = int(workshop["tenant_id"]) if workshop.get("tenant_id") is not None else 1
         return LoginResponse(
             id=int(workshop["id"]),
             email=str(workshop["email"]),
@@ -151,16 +164,25 @@ def login_service(payload: LoginRequest) -> LoginResponse:
             phone=str(workshop["phone"]),
             role=WORKSHOP_ROLE,
             status=workshop_login_status(workshop["approval_status"]),
+            tenant_id=workshop_tenant_id,
             requires_password_change=False,
-            access_token=secrets.token_urlsafe(32),
+            access_token=create_access_token(int(workshop["id"]), WORKSHOP_ROLE, workshop_tenant_id),
             token_type="Bearer",
         )
 
     client = get_client_by_email(normalized_email)
     if not client or not verify_password(payload.password, str(client["password_hash"])):
+        tenant_client_login = _try_tenant_client_login(normalized_email, payload.password)
+        if tenant_client_login:
+            return tenant_client_login
+        # Intenta en usuarios_tenant antes de fallar definitivamente
+        tenant_login = _try_tenant_user_login(normalized_email, payload.password)
+        if tenant_login:
+            return tenant_login
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Correo o contraseña incorrectos")
     if client["status"] != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta suspendida")
+    client_tenant_id = int(client["tenant_id"]) if client.get("tenant_id") is not None else 1
     return LoginResponse(
         id=int(client["id"]),
         email=str(client["email"]),
@@ -168,10 +190,212 @@ def login_service(payload: LoginRequest) -> LoginResponse:
         phone=str(client["phone"]),
         role=str(client["role"]),
         status=str(client["status"]),
+        tenant_id=client_tenant_id,
         requires_password_change=False,
-        access_token=secrets.token_urlsafe(32),
+        access_token=create_access_token(int(client["id"]), str(client["role"]), client_tenant_id),
         token_type="Bearer",
     )
+
+
+def _find_tenant_client_by_email(email: str) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Busca un cliente por correo dentro de los tenants activos."""
+    try:
+        from app.saas_master import list_all_tenants
+        from app.tenant_manager import get_tenant_engine
+        from sqlalchemy import text
+
+        tenants = list_all_tenants()
+        for tenant in tenants:
+            if tenant.get("estado") != "activo":
+                continue
+            try:
+                engine = get_tenant_engine(tenant)
+                with engine.connect() as conn:
+                    row = conn.execute(
+                        text("SELECT * FROM clients WHERE email = :email"),
+                        {"email": email},
+                    ).mappings().first()
+                if row:
+                    return dict(tenant), dict(row)
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
+def _try_tenant_client_login(email: str, password: str) -> "LoginResponse | None":
+    """Intenta autenticar un cliente almacenado en la tabla clients de un tenant."""
+    tenant_match = _find_tenant_client_by_email(email)
+    if not tenant_match:
+        return None
+
+    tenant, row = tenant_match
+    ensure_login_not_locked(ROLE_CLIENTE, email)
+    if not verify_password(password, str(row.get("password_hash") or "")):
+        register_failed_login_attempt(ROLE_CLIENTE, email)
+    if row.get("status") != "active":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta suspendida")
+
+    reset_login_attempts(ROLE_CLIENTE, email)
+    access_token = create_access_token(
+        user_id=int(row["id"]),
+        role=str(row.get("role") or ROLE_CLIENTE),
+        tenant_id=int(tenant["id"]),
+        tenant_slug=str(tenant["slug"]),
+        sucursal_id=None,
+    )
+    return LoginResponse(
+        id=int(row["id"]),
+        email=str(row["email"]),
+        full_name=str(row["full_name"]) if row.get("full_name") is not None else None,
+        phone=str(row["phone"]) if row.get("phone") is not None else None,
+        role=str(row.get("role") or ROLE_CLIENTE),
+        status=str(row.get("status") or "active"),
+        tenant_id=int(tenant["id"]),
+        tenant_slug=str(tenant["slug"]),
+        sucursal_id=None,
+        requires_password_change=False,
+        access_token=access_token,
+        token_type="Bearer",
+    )
+
+
+def _try_tenant_user_login(email: str, password: str) -> "LoginResponse | None":
+    """
+    Busca el usuario en todos los tenants activos de saas_master.
+
+    Si lo encuentra y la contraseña es correcta, devuelve LoginResponse
+    con tenant_slug en el JWT. Si no, retorna None.
+    """
+    try:
+        from app.saas_master import list_all_tenants
+        from app.tenant_manager import get_tenant_engine
+        from sqlalchemy import text
+
+        tenants = list_all_tenants()
+        for tenant in tenants:
+            if tenant.get("estado") != "activo":
+                continue
+            try:
+                engine = get_tenant_engine(tenant)
+                with engine.connect() as conn:
+                    row = conn.execute(
+                        text("SELECT * FROM usuarios_tenant WHERE email = :email"),
+                        {"email": email},
+                    ).mappings().first()
+                if not row:
+                    continue
+                row = dict(row)
+                if not verify_password(password, str(row["password_hash"])):
+                    continue
+                if row.get("estado") != "activo":
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Cuenta de usuario suspendida o inactiva",
+                    )
+                technician_id = None
+                if str(row.get("role")) == ROLE_TECNICO:
+                    if row.get("sucursal_id") is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Tu cuenta técnica no tiene sucursal asignada. Solicita a tu empresa que complete la asignación.",
+                        )
+                    technician_id = _resolve_tenant_operational_technician_id(tenant, row)
+                    if technician_id is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Tu cuenta técnica no tiene técnico operativo vinculado. Solicita a tu empresa que revise la configuración.",
+                        )
+                # Encontrado: genera JWT con tenant_slug
+                sucursal_id = int(row["sucursal_id"]) if row.get("sucursal_id") else None
+                access_token = create_access_token(
+                    user_id=int(row["id"]),
+                    role=str(row["role"]),
+                    tenant_id=int(tenant["id"]),
+                    tenant_slug=str(tenant["slug"]),
+                    sucursal_id=sucursal_id,
+                    technician_id=technician_id,
+                )
+                return LoginResponse(
+                    id=int(row["id"]),
+                    email=str(row["email"]),
+                    full_name=str(row["full_name"]),
+                    phone=str(row["phone"]),
+                    role=str(row["role"]),
+                    status="active",
+                    tenant_id=int(tenant["id"]),
+                    tenant_slug=str(tenant["slug"]),
+                    sucursal_id=sucursal_id,
+                    requires_password_change=False,
+                    access_token=access_token,
+                    token_type="Bearer",
+                )
+            except HTTPException:
+                raise
+            except Exception:
+                continue
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_tenant_operational_technician_id(
+    tenant: dict[str, object],
+    tenant_user: dict[str, object],
+) -> int | None:
+    """Resuelve el technicians.id operativo asociado a un usuario TECNICO."""
+    try:
+        from app.tenant_manager import get_tenant_engine
+        from sqlalchemy import text
+
+        engine = get_tenant_engine(tenant)
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM technicians
+                    WHERE usuario_tenant_id = :usuario_tenant_id
+                    LIMIT 1
+                    """
+                ),
+                {"usuario_tenant_id": int(tenant_user["id"])},
+            ).mappings().first()
+            if row:
+                return int(row["id"])
+            fallback = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM technicians
+                    WHERE (
+                        email = :email
+                        OR (
+                            full_name = :full_name
+                            AND (
+                                :sucursal_id IS NULL
+                                OR sucursal_id = :sucursal_id
+                            )
+                        )
+                    )
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "email": str(tenant_user.get("email") or ""),
+                    "full_name": str(tenant_user.get("full_name") or ""),
+                    "sucursal_id": int(tenant_user["sucursal_id"]) if tenant_user.get("sucursal_id") is not None else None,
+                },
+            ).mappings().first()
+            if fallback:
+                return int(fallback["id"])
+    except Exception:
+        return None
+    return None
 
 
 """
@@ -186,6 +410,10 @@ def lookup_account_type_service(payload: AccountTypeLookupRequest) -> AccountTyp
     client = get_client_by_email(normalized_email)
     if client:
         return AccountTypeLookupResponse(role=str(client["role"]))
+    tenant_client = _find_tenant_client_by_email(normalized_email)
+    if tenant_client:
+        _tenant, tenant_client_row = tenant_client
+        return AccountTypeLookupResponse(role=str(tenant_client_row.get("role") or ROLE_CLIENTE))
     return AccountTypeLookupResponse(role=None)
 
 
@@ -200,6 +428,34 @@ def forgot_password_service(payload: UnifiedForgotPasswordRequest) -> dict[str, 
         if client["status"] != "active":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta suspendida")
         updated = update_client_password(int(client["id"]), hash_password(payload.new_password))
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cliente no encontrado")
+        return {"message": "La contraseña del cliente fue restablecida correctamente"}
+    tenant_client = _find_tenant_client_by_email(normalized_email)
+    if tenant_client:
+        tenant, tenant_client_row = tenant_client
+        if tenant_client_row.get("status") != "active":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta suspendida")
+        from app.tenant_manager import get_tenant_engine
+        from sqlalchemy import text
+
+        engine = get_tenant_engine(tenant)
+        with engine.begin() as conn:
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE clients
+                    SET password_hash = :password_hash,
+                        updated_at = NOW()
+                    WHERE id = :id
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": int(tenant_client_row["id"]),
+                    "password_hash": hash_password(payload.new_password),
+                },
+            ).mappings().first()
         if not updated:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cliente no encontrado")
         return {"message": "La contraseña del cliente fue restablecida correctamente"}

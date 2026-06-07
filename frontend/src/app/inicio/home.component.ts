@@ -27,165 +27,27 @@ type HeroBenefit = {
 
         <div class="hero-grid">
           <div class="hero-copy">
-            <p class="hero-kicker">Red nacional de talleres afiliados</p>
-            <h1>¿QUIERES REGISTRAR TU TALLER EN NUESTRA RED?</h1>
+            <p class="hero-kicker">Plataforma SaaS para empresas de auxilio</p>
+            <h1>REGISTRA TU EMPRESA Y ADMINISTRA TU RED DE SUCURSALES</h1>
 
             <article class="register-card">
-              <p class="card-eyebrow">Afiliación inmediata</p>
-              <h2>Registra tu taller mecánico</h2>
+              <p class="card-eyebrow">Registro oficial</p>
+              <h2>Registrar mi empresa</h2>
               <p class="card-lead">
-                Únete a nuestra red y aumenta tus ingresos atendiendo emergencias cerca de ti.
+                Crea tu tenant, define sucursales reales, habilita técnicos y opera emergencias y
+                cotizaciones desde un solo panel.
               </p>
-
-              <!--
-                AQUI ESTA EL FORMULARIO DE REGISTRO DE TALLERES
-              -->
-              <form class="register-form" (ngSubmit)="submitWorkshop(workshopForm)" #workshopForm="ngForm">
-                <label>
-                  <span>Nombre del Taller</span>
-                  <input
-                    type="text"
-                    name="workshopName"
-                    [(ngModel)]="form.workshopName"
-                    #workshopNameModel="ngModel"
-                    placeholder="Nombre del Taller"
-                    required
-                    minlength="3"
-                  />
-                  <small class="field-error" *ngIf="showFieldError(workshopNameModel)">
-                    Ingresa el nombre del taller.
-                  </small>
-                </label>
-
-                <label>
-                  <span>Nombre Responsable</span>
-                  <input
-                    type="text"
-                    name="contactName"
-                    [(ngModel)]="form.contactName"
-                    #contactNameModel="ngModel"
-                    placeholder="Nombre Responsable"
-                    required
-                    minlength="3"
-                  />
-                  <small class="field-error" *ngIf="showFieldError(contactNameModel)">
-                    Ingresa el nombre del responsable.
-                  </small>
-                </label>
-
-                <label>
-                  <span>Número Telefónico</span>
-                  <input
-                    type="tel"
-                    name="phone"
-                    [(ngModel)]="form.phone"
-                    #phoneModel="ngModel"
-                    placeholder="Número Telefónico"
-                    required
-                    minlength="7"
-                  />
-                  <small class="field-error" *ngIf="showFieldError(phoneModel)">
-                    Ingresa un número telefónico válido.
-                  </small>
-                </label>
-
-                <label>
-                  <span>Correo Electrónico</span>
-                  <input
-                    type="email"
-                    name="email"
-                    [(ngModel)]="form.email"
-                    #emailModel="ngModel"
-                    placeholder="Correo Electrónico"
-                    required
-                  />
-                  <small class="field-error" *ngIf="showFieldError(emailModel)">
-                    Ingresa un correo electrónico válido.
-                  </small>
-                </label>
-
-                <label>
-                  <span>Dirección del Taller</span>
-                  <select name="zone" [(ngModel)]="form.zone" #zoneModel="ngModel" required>
-                    <option value="">Selecciona una zona</option>
-                    <option *ngFor="let zone of workshopZones" [value]="zone">{{ zone }}</option>
-                  </select>
-                  <small class="field-error" *ngIf="showFieldError(zoneModel)">
-                    Selecciona una zona.
-                  </small>
-                </label>
-
-                <label>
-                  <span>Tipo de Especialidades</span>
-                  <select name="specialty" [(ngModel)]="form.specialty" #specialtyModel="ngModel" required>
-                    <option value="">Selecciona una especialidad</option>
-                    <option *ngFor="let specialty of specialties" [value]="specialty">
-                      {{ specialty }}
-                    </option>
-                  </select>
-                  <small class="field-error" *ngIf="showFieldError(specialtyModel)">
-                    Selecciona una especialidad.
-                  </small>
-                </label>
-
-                <label class="full-width">
-                  <span>Ubicación del Taller</span>
-                  <div class="map-field">
-                    <button
-                      class="map-locate-button"
-                      type="button"
-                      (click)="locateCurrentPosition()"
-                      [disabled]="isLocating"
-                      [attr.aria-label]="isLocating ? 'Obteniendo ubicación actual' : 'Usar ubicación actual'"
-                      [title]="
-                        isLocating
-                          ? 'Ubicando...'
-                          : isSecureContext
-                            ? 'Usar ubicación actual'
-                            : 'La ubicación automática requiere HTTPS o localhost'
-                      "
-                    >
-                      ⌖
-                    </button>
-                    <div
-                      #workshopMap
-                      class="workshop-map"
-                      aria-label="Mapa interactivo de ubicación del taller"
-                    ></div>
-                  </div>
-                  <div class="map-meta">
-                    <small>Haz clic en el mapa o arrastra el marcador para elegir la ubicación exacta.</small>
-                    <strong>
-                      Lat: {{ selectedLatitude.toFixed(6) }} | Lng: {{ selectedLongitude.toFixed(6) }}
-                    </strong>
-                    <span class="map-status error" *ngIf="locationMessage">
-                      {{ locationMessage }}
-                    </span>
-                    <span class="map-status error" *ngIf="showLocationError">
-                      Selecciona una ubicación en el mapa o usa tu ubicación actual.
-                    </span>
-                  </div>
-                </label>
-
-                <p class="terms-copy">
-                  Al registrarte aceptas nuestros Términos y Condiciones y Política de Privacidad.
-                </p>
-
-                <p class="form-feedback error" *ngIf="submitState === 'error'">
-                  {{ submitMessage }}
+              <div class="register-form">
+                <p class="terms-copy" style="margin-bottom: 1.25rem;">
+                  El alta pública real de empresas se realiza desde <strong>/registro-taller</strong>.
+                  La gestión operativa de talleres queda dentro de <strong>Mis Sucursales</strong>.
                 </p>
 
                 <div class="form-actions">
-                  <button
-                    class="cta-primary"
-                    type="submit"
-                    [disabled]="isSubmitting"
-                  >
-                    {{ isSubmitting ? 'Registrando...' : 'Registrar taller' }}
-                  </button>
+                  <a class="cta-primary" routerLink="/registro-taller">Registrar mi empresa</a>
                   <a class="cta-secondary" routerLink="/contacto">Solicitar asesoría</a>
                 </div>
-              </form>
+              </div>
             </article>
           </div>
 
