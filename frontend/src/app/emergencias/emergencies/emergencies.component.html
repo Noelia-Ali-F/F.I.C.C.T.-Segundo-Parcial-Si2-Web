@@ -117,9 +117,12 @@
     </div>
 
     <p class="workshop-edit-feedback" *ngIf="emergencyFeedback">{{ emergencyFeedback }}</p>
+    <p class="workshop-edit-feedback" *ngIf="selectedMaintenanceRequest.workshopCandidateMessage">
+      {{ selectedMaintenanceRequest.workshopCandidateMessage }}
+    </p>
 
     <div class="workshop-edit-actions">
-      <button class="dashboard-refresh-button" type="button" (click)="updateSelectedEmergencyStatus('activo')" [disabled]="isUpdatingEmergencyStatus">Aceptar</button>
+      <button class="dashboard-refresh-button" type="button" (click)="updateSelectedEmergencyStatus('activo')" [disabled]="isUpdatingEmergencyStatus || !selectedMaintenanceRequest.canAccept">Aceptar</button>
       <button class="dashboard-secondary-button" type="button" (click)="updateSelectedEmergencyStatus('rechazado')" [disabled]="isUpdatingEmergencyStatus">Rechazar</button>
       <button class="dashboard-secondary-button" type="button" (click)="closeEmergencyModal()">Cerrar</button>
     </div>

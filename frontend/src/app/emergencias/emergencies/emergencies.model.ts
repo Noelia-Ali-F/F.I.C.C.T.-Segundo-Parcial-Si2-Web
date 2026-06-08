@@ -31,6 +31,9 @@ export type EmergencyReport = {
   assigned_technician_phone: string | null;
   assigned_technician_email: string | null;
   assigned_technician_specialty: string | null;
+  workshop_candidate_status?: string | null;
+  workshop_candidate_message?: string | null;
+  can_accept?: boolean;
   created_at: string;
 };
 
@@ -63,6 +66,9 @@ export type MaintenanceRequest = {
   assignedTechnicianName: string | null;
   assignedTechnicianPhone: string | null;
   assignedTechnicianSpecialty: string | null;
+  workshopCandidateStatus: string | null;
+  workshopCandidateMessage: string | null;
+  canAccept: boolean;
 };
 
 export type AuditTone = 'info' | 'success' | 'warning' | 'danger';

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
@@ -8,11 +9,11 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.config import settings
 from app.db import (
-    create_notification,
     create_quotation_request_history,
     create_quotation_offer,
     create_quotation_request,
     create_quotation_request_workshop,
+    get_active_quotation_request_by_emergency,
     get_contracted_service,
     get_emergency_report_by_id,
     get_quotation_offer_by_request_and_workshop,
@@ -36,6 +37,10 @@ from app.db import (
     update_quotation_offer,
     update_quotation_request_status,
 )
+from app.realtime import emit_realtime_events
+from app.realtime_types import RealtimeEmitEvent
+from app.services.notification_service import notify_quotation_event
+from app.tenant_context import get_tenant
 from app.utils import (
     ROLE_ADMIN_SUCURSAL,
     ROLE_CLIENTE,
@@ -47,10 +52,6 @@ from app.utils import (
     get_current_user,
     normalize_optional_text,
     normalize_role,
-    send_quotation_offer_not_selected,
-    send_quotation_offer_received,
-    send_quotation_offer_selected,
-    send_quotation_request_sent,
 )
 
 logger = logging.getLogger(__name__)
@@ -292,6 +293,20 @@ def _ensure_workshop_scope(workshop_id: int, current_user: TokenPayload | None) 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ACCESO_DENEGADO_SUCURSAL")
 
 
+def _ensure_client_quotation_request_role(current_user: TokenPayload) -> str:
+    role = _ensure_non_global_quotation_access(current_user)
+    if role != ROLE_CLIENTE:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="SOLO_CLIENTE_PUEDE_SOLICITAR_COTIZACION")
+    return role
+
+
+def _ensure_workshop_management_role(current_user: TokenPayload) -> str:
+    role = _ensure_non_global_quotation_access(current_user)
+    if role not in {ROLE_ADMIN_SUCURSAL, ROLE_SUPERADMIN_TENANT}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROL_NO_AUTORIZADO_PARA_GESTIONAR_COTIZACIONES")
+    return role
+
+
 def _ensure_non_global_quotation_access(current_user: TokenPayload) -> str:
     role = normalize_role(current_user.role)
     if role == ROLE_SUPERADMIN_GLOBAL:
@@ -336,6 +351,85 @@ def _tenant_quotation_scope(current_user: TokenPayload) -> tuple[int, int | None
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROL_NO_AUTORIZADO_PARA_ESTA_CONSULTA")
 
 
+def _quotation_realtime_scope() -> tuple[int | None, str | None]:
+    tenant = get_tenant()
+    tenant_id = int(tenant["id"]) if tenant and tenant.get("id") is not None else None
+    tenant_slug = str(tenant["slug"]) if tenant and tenant.get("slug") else None
+    return tenant_id, tenant_slug
+
+
+def _emit_quotation_realtime_events(
+    event_type: str,
+    request_record: Mapping[str, object],
+    *,
+    client_id: int | None = None,
+    sucursal_ids: set[int] | None = None,
+    payload: Mapping[str, object] | None = None,
+) -> None:
+    tenant_id, tenant_slug = _quotation_realtime_scope()
+    if tenant_id is None or not tenant_slug:
+        logger.warning("WS quotation event skipped event_type=%s quotation_id=%s tenant scope missing", event_type, request_record.get("id"))
+        return
+
+    quotation_id = int(request_record["id"])
+    event_payload: dict[str, object] = {
+        "quotation_id": quotation_id,
+        "emergency_id": int(request_record["emergency_id"]) if request_record.get("emergency_id") is not None else None,
+        "client_id": int(request_record["client_id"]) if request_record.get("client_id") is not None else None,
+        "status": request_record.get("status"),
+        "selected_offer_id": int(request_record["selected_offer_id"]) if request_record.get("selected_offer_id") is not None else None,
+    }
+    if payload:
+        event_payload.update(payload)
+
+    events: list[RealtimeEmitEvent] = [
+        RealtimeEmitEvent(
+            type=event_type,
+            tenant_id=tenant_id,
+            tenant_slug=tenant_slug,
+            entity_type="quotation_request",
+            entity_id=quotation_id,
+            payload=event_payload,
+        )
+    ]
+
+    for sucursal_id in sorted(sucursal_ids or set()):
+        events.append(
+            RealtimeEmitEvent(
+                type=event_type,
+                tenant_id=tenant_id,
+                tenant_slug=tenant_slug,
+                sucursal_id=sucursal_id,
+                role_target=ROLE_ADMIN_SUCURSAL,
+                entity_type="quotation_request",
+                entity_id=quotation_id,
+                payload=event_payload,
+            )
+        )
+
+    effective_client_id = client_id if client_id is not None else (
+        int(request_record["client_id"]) if request_record.get("client_id") is not None else None
+    )
+    if effective_client_id is not None:
+        events.append(
+            RealtimeEmitEvent(
+                type=event_type,
+                tenant_id=tenant_id,
+                tenant_slug=tenant_slug,
+                user_id=effective_client_id,
+                role_target=ROLE_CLIENTE,
+                entity_type="quotation_request",
+                entity_id=quotation_id,
+                payload=event_payload,
+            )
+        )
+
+    try:
+        asyncio.run(emit_realtime_events(events))
+    except Exception:
+        logger.exception("WS quotation emit failed event_type=%s quotation_id=%s", event_type, quotation_id)
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -347,7 +441,7 @@ def solicitar_cotizacion(
     payload: QuotationRequestCreate,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> QuotationRequestDetailResponse:
-    role = _ensure_non_global_quotation_access(current_user)
+    _ensure_client_quotation_request_role(current_user)
     try:
         emergency = get_emergency_report_by_id(payload.emergency_id)
     except OperationalError as exc:
@@ -355,11 +449,22 @@ def solicitar_cotizacion(
     if not emergency:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Emergencia no encontrada")
 
-    client_id = payload.client_id or (int(emergency["client_id"]) if emergency.get("client_id") is not None else None)
+    client_id = int(emergency["client_id"]) if emergency.get("client_id") is not None else current_user.user_id
     emergency_client_id = int(emergency["client_id"]) if emergency.get("client_id") is not None else None
-    if role == ROLE_CLIENTE:
-        if client_id != current_user.user_id or emergency_client_id != current_user.user_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CLIENT_ID_AJENO_NO_PERMITIDO")
+    if payload.client_id is not None and payload.client_id != current_user.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CLIENT_ID_AJENO_NO_PERMITIDO")
+    if emergency_client_id != current_user.user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Emergencia no encontrada")
+
+    try:
+        existing_active = get_active_quotation_request_by_emergency(payload.emergency_id)
+    except OperationalError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
+    if existing_active is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ya existe una solicitud de cotización activa para esta emergencia",
+        )
 
     try:
         compatible_workshops = _find_compatible_workshops(emergency, payload.max_workshops)
@@ -383,17 +488,29 @@ def solicitar_cotizacion(
     except OperationalError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
 
-    # FCM: notificar a cada taller invitado
+    invited_sucursal_ids: set[int] = set()
     for workshop in compatible_workshops:
+        if workshop.get("sucursal_id") is not None:
+            invited_sucursal_ids.add(int(workshop["sucursal_id"]))
         try:
-            send_quotation_request_sent(
-                workshop_id=int(workshop["id"]),
+            notify_quotation_event(
+                "REQUEST_SENT_TO_WORKSHOPS",
                 quotation_id=int(quotation["id"]),
+                workshop_id=int(workshop["id"]),
+                workshop_name=str(workshop.get("workshop_name") or workshop.get("name") or ""),
                 emergency_id=payload.emergency_id,
-                status="abierto",
+                sucursal_id=int(workshop["sucursal_id"]) if workshop.get("sucursal_id") is not None else None,
             )
         except Exception:
-            logger.exception("No se pudo enviar FCM quotation_request_sent al taller %s", workshop["id"])
+            logger.exception("No se pudo registrar/enviar REQUEST_SENT_TO_WORKSHOPS al taller %s", workshop["id"])
+
+    _emit_quotation_realtime_events(
+        "quotation_requested",
+        quotation,
+        client_id=client_id,
+        sucursal_ids=invited_sucursal_ids,
+        payload={"requested_workshops_count": len(compatible_workshops)},
+    )
 
     return QuotationRequestDetailResponse(
         request=QuotationRequestResponse.model_validate(quotation),
@@ -425,7 +542,7 @@ def listar_cotizaciones_taller(
     workshop_id: int,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> list[QuotationRequestWithInvitationResponse]:
-    _ensure_non_global_quotation_access(current_user)
+    _ensure_workshop_management_role(current_user)
     _ensure_workshop_scope(workshop_id, current_user)
     try:
         rows = list_quotation_requests_by_workshop(workshop_id)
@@ -457,7 +574,7 @@ def historial_ofertas_taller(
     workshop_id: int,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> list[QuotationOfferHistorialResponse]:
-    _ensure_non_global_quotation_access(current_user)
+    _ensure_workshop_management_role(current_user)
     _ensure_workshop_scope(workshop_id, current_user)
     try:
         rows = list_quotation_offers_by_workshop(workshop_id)
@@ -538,7 +655,7 @@ def registrar_propuesta(
     payload: QuotationOfferCreate,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> QuotationOfferResponse:
-    _ensure_non_global_quotation_access(current_user)
+    _ensure_workshop_management_role(current_user)
     _ensure_workshop_scope(payload.workshop_id, current_user)
     record = _get_request_or_404(quotation_id)
     request_expires_at = record.get("expires_at")
@@ -617,36 +734,33 @@ def registrar_propuesta(
     except OperationalError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
 
-    # Notificación en BD + FCM al cliente
     client_id_raw = record.get("client_id")
     workshop_label = str(offer.get("workshop_name") or payload.workshop_id)
-    price_label = f"Bs. {offer['price']:.2f}" if offer.get("price") is not None else "—"
-    if client_id_raw is not None:
-        try:
-            import json as _json
-            create_notification({
-                "user_id": int(client_id_raw),
-                "title": "Nueva cotización recibida",
-                "message": f"Un taller ha enviado una propuesta para tu emergencia. Precio: {price_label}",
-                "payload_json": _json.dumps({
-                    "quotation_id": quotation_id,
-                    "offer_id": offer["id"],
-                    "workshop_name": workshop_label,
-                    "price": str(offer.get("price") or ""),
-                }),
-            })
-        except Exception:
-            logger.exception("No se pudo guardar notificación en BD para quotation %s", quotation_id)
     try:
-        send_quotation_offer_received(
-            client_id=int(client_id_raw) if client_id_raw is not None else None,
+        notify_quotation_event(
+            "QUOTATION_RECEIVED",
             quotation_id=quotation_id,
+            client_id=int(client_id_raw) if client_id_raw is not None else None,
+            offer_id=int(offer["id"]) if offer.get("id") is not None else None,
             emergency_id=int(record["emergency_id"]) if record.get("emergency_id") is not None else None,
             workshop_name=workshop_label,
             price=float(offer["price"]) if offer.get("price") is not None else None,
         )
     except Exception:
-        logger.exception("No se pudo enviar FCM quotation_offer_received para quotation %s", quotation_id)
+        logger.exception("No se pudo registrar/enviar QUOTATION_RECEIVED para quotation %s", quotation_id)
+
+    offer_sucursal_id = int(workshop["sucursal_id"]) if workshop.get("sucursal_id") is not None else None
+    _emit_quotation_realtime_events(
+        "quotation_submitted",
+        record,
+        sucursal_ids={offer_sucursal_id} if offer_sucursal_id is not None else None,
+        payload={
+            "offer_id": int(offer["id"]) if offer.get("id") is not None else None,
+            "workshop_id": payload.workshop_id,
+            "sucursal_id": offer_sucursal_id,
+            "price": float(offer["price"]) if offer.get("price") is not None else None,
+        },
+    )
 
     return QuotationOfferResponse.model_validate(offer)
 
@@ -661,7 +775,7 @@ def actualizar_propuesta(
     payload: QuotationOfferCreate,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> QuotationOfferResponse:
-    _ensure_non_global_quotation_access(current_user)
+    _ensure_workshop_management_role(current_user)
     _ensure_workshop_scope(payload.workshop_id, current_user)
     record = _get_request_or_404(quotation_id)
     request_expires_at = record.get("expires_at")
@@ -727,33 +841,31 @@ def actualizar_propuesta(
 
     client_id_raw = record.get("client_id")
     workshop_label = str(offer.get("workshop_name") or payload.workshop_id)
-    price_label = f"Bs. {offer['price']:.2f}" if offer.get("price") is not None else "—"
-    if client_id_raw is not None:
-        try:
-            import json as _json
-            create_notification({
-                "user_id": int(client_id_raw),
-                "title": "Cotización actualizada",
-                "message": f"Un taller actualizó su propuesta para tu emergencia. Precio: {price_label}",
-                "payload_json": _json.dumps({
-                    "quotation_id": quotation_id,
-                    "offer_id": offer_id,
-                    "workshop_name": workshop_label,
-                    "price": str(offer.get("price") or ""),
-                }),
-            })
-        except Exception:
-            logger.exception("No se pudo guardar notificación en BD para actualización quotation %s", quotation_id)
     try:
-        send_quotation_offer_received(
-            client_id=int(client_id_raw) if client_id_raw is not None else None,
+        notify_quotation_event(
+            "QUOTATION_RECEIVED",
             quotation_id=quotation_id,
+            client_id=int(client_id_raw) if client_id_raw is not None else None,
+            offer_id=offer_id,
             emergency_id=int(record["emergency_id"]) if record.get("emergency_id") is not None else None,
             workshop_name=workshop_label,
             price=float(offer["price"]) if offer.get("price") is not None else None,
         )
     except Exception:
-        logger.exception("No se pudo enviar FCM quotation_offer_received para actualización quotation %s", quotation_id)
+        logger.exception("No se pudo registrar/enviar QUOTATION_RECEIVED para actualización quotation %s", quotation_id)
+
+    offer_sucursal_id = int(workshop["sucursal_id"]) if workshop.get("sucursal_id") is not None else None
+    _emit_quotation_realtime_events(
+        "quotation_submitted",
+        record,
+        sucursal_ids={offer_sucursal_id} if offer_sucursal_id is not None else None,
+        payload={
+            "offer_id": int(offer["id"]) if offer.get("id") is not None else offer_id,
+            "workshop_id": payload.workshop_id,
+            "sucursal_id": offer_sucursal_id,
+            "price": float(offer["price"]) if offer.get("price") is not None else None,
+        },
+    )
 
     return QuotationOfferResponse.model_validate(offer)
 
@@ -803,36 +915,32 @@ def seleccionar_propuesta(
     except Exception:
         logger.exception("No se pudo registrar historial taller_seleccionado para quotation %s", quotation_id)
 
-    # FCM: notificar al taller ganador que su propuesta fue seleccionada
     try:
-        send_quotation_offer_selected(
-            workshop_id=winning_workshop_id,
+        notify_quotation_event(
+            "QUOTATION_ACCEPTED",
             quotation_id=quotation_id,
+            workshop_id=winning_workshop_id,
             emergency_id=emergency_id,
+            sucursal_id=int(offer["sucursal_id"]) if offer.get("sucursal_id") is not None else None,
+            workshop_name=str(offer.get("workshop_name") or winning_workshop_id),
             price=float(offer["price"]) if offer.get("price") is not None else None,
+            offer_id=int(offer["id"]) if offer.get("id") is not None else None,
         )
     except Exception:
-        logger.exception("No se pudo enviar FCM quotation_offer_selected para quotation %s", quotation_id)
+        logger.exception("No se pudo registrar/enviar QUOTATION_ACCEPTED para quotation %s", quotation_id)
 
-    # FCM: notificar a los talleres rechazados
-    try:
-        rejected = list_rejected_offers_for_request(quotation_id)
-        for rejected_offer in rejected:
-            rejected_workshop_id = int(rejected_offer["workshop_id"])
-            if rejected_workshop_id != winning_workshop_id:
-                try:
-                    send_quotation_offer_not_selected(
-                        workshop_id=rejected_workshop_id,
-                        quotation_id=quotation_id,
-                        emergency_id=emergency_id,
-                    )
-                except Exception:
-                    logger.exception(
-                        "No se pudo enviar FCM quotation_offer_not_selected a workshop %s quotation %s",
-                        rejected_workshop_id, quotation_id,
-                    )
-    except Exception:
-        logger.exception("No se pudo notificar talleres rechazados para quotation %s", quotation_id)
+    accepted_sucursal_id = int(offer["sucursal_id"]) if offer.get("sucursal_id") is not None else None
+    _emit_quotation_realtime_events(
+        "quotation_accepted",
+        updated,
+        sucursal_ids={accepted_sucursal_id} if accepted_sucursal_id is not None else None,
+        payload={
+            "offer_id": int(offer["id"]) if offer.get("id") is not None else None,
+            "workshop_id": winning_workshop_id,
+            "sucursal_id": accepted_sucursal_id,
+            "price": float(offer["price"]) if offer.get("price") is not None else None,
+        },
+    )
 
     return QuotationRequestResponse.model_validate(updated)
 
@@ -845,7 +953,7 @@ def listar_servicios_contratados(
     workshop_id: int,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> list[ContractedServiceResponse]:
-    _ensure_non_global_quotation_access(current_user)
+    _ensure_workshop_management_role(current_user)
     _ensure_workshop_scope(workshop_id, current_user)
     try:
         rows = list_contracted_services(workshop_id)
@@ -878,7 +986,7 @@ def obtener_servicio_contratado(
     offer_id: int,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> ContractedServiceResponse:
-    _ensure_non_global_quotation_access(current_user)
+    _ensure_workshop_management_role(current_user)
     _ensure_workshop_scope(workshop_id, current_user)
     try:
         row = get_contracted_service(offer_id, workshop_id)

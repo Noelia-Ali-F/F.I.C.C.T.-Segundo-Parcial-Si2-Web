@@ -4,7 +4,10 @@ import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 
-import { OfflineEmergencyService } from './offline-emergency.service';
+import {
+  EmergencyRoutingPreview,
+  OfflineEmergencyService,
+} from './offline-emergency.service';
 
 const PROBLEM_TYPES = [
   'Batería',
@@ -82,7 +85,7 @@ const MAX_PHOTOS = 6;
 
             <label class="form-field">
               <span>Tipo de incidente <em>*</em></span>
-              <select name="problemType" [(ngModel)]="form.problemType" required>
+              <select name="problemType" [(ngModel)]="form.problemType" (ngModelChange)="onProblemTypeChanged()" required>
                 <option value="" disabled>Selecciona un tipo...</option>
                 <option *ngFor="let pt of problemTypes" [value]="pt">{{ pt }}</option>
               </select>
@@ -94,6 +97,7 @@ const MAX_PHOTOS = 6;
               <textarea
                 name="description"
                 [(ngModel)]="form.description"
+                (blur)="refreshRoutingPreviewIfPossible()"
                 rows="4"
                 maxlength="4000"
                 placeholder="Describe el problema con detalle para que el técnico llegue preparado..."
@@ -130,6 +134,60 @@ const MAX_PHOTOS = 6;
             </div>
 
             <p class="field-error" *ngIf="locationError">{{ locationError }}</p>
+
+            <div class="routing-preview-card" *ngIf="routingPreview || routingPreviewLoading || routingPreviewError">
+              <div class="routing-preview-header">
+                <div>
+                  <p class="routing-kicker">Sugerencia inteligente</p>
+                  <h3>Sucursales compatibles</h3>
+                </div>
+                <button
+                  type="button"
+                  class="btn-sm btn-ghost"
+                  (click)="refreshRoutingPreviewIfPossible(true)"
+                  [disabled]="routingPreviewLoading || !canResolveRoutingPreview"
+                >
+                  {{ routingPreviewLoading ? 'Consultando...' : 'Actualizar sugerencia' }}
+                </button>
+              </div>
+
+              <p class="routing-helper" *ngIf="!routingPreviewLoading && !routingPreview && !routingPreviewError">
+                Captura ubicación y selecciona el tipo de incidente para sugerir la sucursal más cercana.
+              </p>
+              <p class="field-error" *ngIf="routingPreviewError">{{ routingPreviewError }}</p>
+
+              <div class="routing-highlight" *ngIf="routingPreview as preview">
+                <p class="routing-label">Sucursal sugerida para el móvil</p>
+                <strong>{{ preview.nearest_sucursal_nombre || 'Sin sucursal sugerida' }}</strong>
+                <span>
+                  {{ preview.nearest_workshop_name || 'Sin taller sugerido' }}
+                  <ng-container *ngIf="preview.nearest_workshop_distance_meters != null">
+                    · {{ formatDistance(preview.nearest_workshop_distance_meters) }}
+                  </ng-container>
+                </span>
+                <small>
+                  {{ preview.total_matching_sucursales }} sucursal{{ preview.total_matching_sucursales === 1 ? '' : 'es' }}
+                  compatible{{ preview.total_matching_sucursales === 1 ? '' : 's' }}
+                </small>
+              </div>
+
+              <div class="routing-candidates" *ngIf="routingPreview?.candidates?.length">
+                <article
+                  class="routing-candidate"
+                  *ngFor="let candidate of routingPreview!.candidates; let i = index"
+                  [class.routing-candidate-primary]="i === 0"
+                >
+                  <div class="routing-candidate-main">
+                    <strong>{{ candidate.sucursal_nombre || ('Sucursal #' + candidate.sucursal_id) }}</strong>
+                    <span>{{ candidate.workshop_name }}</span>
+                  </div>
+                  <div class="routing-candidate-meta">
+                    <span>{{ candidate.specialty || 'Especialidad general' }}</span>
+                    <span>{{ formatDistance(candidate.distance_meters) }}</span>
+                  </div>
+                </article>
+              </div>
+            </div>
 
             <label class="form-field" *ngIf="form.latitude != null">
               <span>Dirección / referencia (opcional)</span>
@@ -518,6 +576,100 @@ const MAX_PHOTOS = 6;
 
     .btn-sm { font-size: 0.8rem; padding: 3px 8px; border-radius: 6px; }
 
+    .routing-preview-card {
+      margin: 1rem 0 1.2rem;
+      padding: 1rem;
+      border-radius: 14px;
+      background:
+        linear-gradient(135deg, rgba(24, 78, 164, 0.08), rgba(27, 164, 132, 0.08)),
+        #f8fbff;
+      border: 1px solid rgba(23, 59, 114, 0.12);
+    }
+    .routing-preview-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 0.75rem;
+      margin-bottom: 0.8rem;
+    }
+    .routing-kicker {
+      margin: 0 0 0.15rem;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #4b638b;
+      font-weight: 700;
+    }
+    .routing-preview-header h3 {
+      margin: 0;
+      font-size: 1rem;
+      color: var(--text-primary);
+    }
+    .routing-helper {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+    .routing-highlight {
+      display: grid;
+      gap: 0.2rem;
+      padding: 0.85rem 0.9rem;
+      border-radius: 12px;
+      background: white;
+      border: 1px solid rgba(23, 59, 114, 0.08);
+      box-shadow: 0 10px 24px rgba(23, 59, 114, 0.05);
+    }
+    .routing-label {
+      margin: 0;
+      color: #4b638b;
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+    .routing-highlight strong {
+      color: var(--text-primary);
+      font-size: 1rem;
+    }
+    .routing-highlight span,
+    .routing-highlight small {
+      color: var(--text-secondary);
+    }
+    .routing-candidates {
+      display: grid;
+      gap: 0.65rem;
+      margin-top: 0.85rem;
+    }
+    .routing-candidate {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+      align-items: center;
+      padding: 0.75rem 0.9rem;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.75);
+      border: 1px solid rgba(23, 59, 114, 0.08);
+    }
+    .routing-candidate-primary {
+      border-color: rgba(16, 185, 129, 0.35);
+      background: rgba(236, 253, 245, 0.92);
+    }
+    .routing-candidate-main,
+    .routing-candidate-meta {
+      display: grid;
+      gap: 0.15rem;
+    }
+    .routing-candidate-main span,
+    .routing-candidate-meta span {
+      color: var(--text-secondary);
+      font-size: 0.84rem;
+    }
+    .routing-candidate-meta {
+      text-align: right;
+      min-width: 110px;
+    }
+
     .success-card {
       background: white;
       border-radius: 20px;
@@ -564,6 +716,9 @@ export class OfflineEmergencyFormComponent implements OnDestroy {
 
   locationLoading = false;
   locationError = '';
+  routingPreviewLoading = false;
+  routingPreviewError = '';
+  routingPreview: EmergencyRoutingPreview | null = null;
   isRecording = false;
   recordingSeconds = 0;
   micError = '';
@@ -587,6 +742,10 @@ export class OfflineEmergencyFormComponent implements OnDestroy {
     this.stopRecordingCleanup();
   }
 
+  get canResolveRoutingPreview(): boolean {
+    return !!this.form.problemType && this.form.latitude != null && this.form.longitude != null && this.isOnline;
+  }
+
   captureLocation(): void {
     if (!navigator.geolocation) {
       this.locationError = 'Geolocalización no disponible en este navegador';
@@ -599,6 +758,7 @@ export class OfflineEmergencyFormComponent implements OnDestroy {
         this.form.latitude = pos.coords.latitude;
         this.form.longitude = pos.coords.longitude;
         this.locationLoading = false;
+        void this.refreshRoutingPreviewIfPossible();
       },
       () => {
         this.locationError = 'No se pudo obtener la ubicación. Verifica los permisos del navegador.';
@@ -613,6 +773,41 @@ export class OfflineEmergencyFormComponent implements OnDestroy {
     this.form.longitude = null;
     this.form.address = '';
     this.form.zone = '';
+    this.routingPreview = null;
+    this.routingPreviewError = '';
+  }
+
+  onProblemTypeChanged(): void {
+    if (!this.form.problemType) {
+      this.routingPreview = null;
+      this.routingPreviewError = '';
+      return;
+    }
+    void this.refreshRoutingPreviewIfPossible();
+  }
+
+  async refreshRoutingPreviewIfPossible(force = false): Promise<void> {
+    if (!this.canResolveRoutingPreview) {
+      if (force && !this.isOnline) {
+        this.routingPreviewError = 'Necesitas conexión para consultar sucursales compatibles.';
+      }
+      return;
+    }
+    this.routingPreviewLoading = true;
+    this.routingPreviewError = '';
+    try {
+      this.routingPreview = await this.offlineService.fetchRoutingPreview({
+        problemType: this.form.problemType,
+        latitude: this.form.latitude!,
+        longitude: this.form.longitude!,
+        description: this.form.description?.trim() || undefined,
+      });
+    } catch {
+      this.routingPreview = null;
+      this.routingPreviewError = 'No se pudo consultar la sucursal sugerida. Puedes guardar igual y el backend resolverá el destino al sincronizar.';
+    } finally {
+      this.routingPreviewLoading = false;
+    }
   }
 
   onPhotosSelected(event: Event): void {
@@ -715,6 +910,13 @@ export class OfflineEmergencyFormComponent implements OnDestroy {
         longitude: this.form.longitude ?? undefined,
         address: this.form.address?.trim() || undefined,
         zone: this.form.zone?.trim() || undefined,
+        nearestWorkshopId: this.routingPreview?.nearest_workshop_id ?? undefined,
+        nearestWorkshopName: this.routingPreview?.nearest_workshop_name ?? undefined,
+        nearestWorkshopSpecialty: this.routingPreview?.problem_type_standardized ?? this.form.problemType,
+        nearestWorkshopZone: this.routingPreview?.candidates?.[0]?.zone ?? undefined,
+        nearestWorkshopDistanceMeters: this.routingPreview?.nearest_workshop_distance_meters ?? undefined,
+        routingTotalMatchingSucursales: this.routingPreview?.total_matching_sucursales ?? undefined,
+        routingCandidates: this.routingPreview?.candidates ?? undefined,
         audioDurationSeconds: this.form.audioDurationSeconds ?? undefined,
         photoDataUrls: [...this.photoDataUrls],
         audioDataUrl: this.audioDataUrl ?? undefined,
@@ -743,7 +945,20 @@ export class OfflineEmergencyFormComponent implements OnDestroy {
       latitude: null, longitude: null, address: '', zone: '',
       audioDurationSeconds: null,
     };
+    this.routingPreview = null;
+    this.routingPreviewError = '';
+    this.routingPreviewLoading = false;
     this.photoDataUrls = [];
     this.audioDataUrl = null;
+  }
+
+  formatDistance(distanceMeters: number | null | undefined): string {
+    if (distanceMeters == null) {
+      return 'Sin distancia';
+    }
+    if (distanceMeters >= 1000) {
+      return `${(distanceMeters / 1000).toFixed(1)} km`;
+    }
+    return `${Math.round(distanceMeters)} m`;
   }
 }

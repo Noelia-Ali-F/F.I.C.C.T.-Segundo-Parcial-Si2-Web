@@ -4,6 +4,7 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.devices import router as devices_router
 from app.routes.emergencies import router as emergencies_router
 from app.routes.health import router as health_router
+from app.routes.notifications import router as notifications_router
 from app.routes.public import router as public_router
 from app.routes.realtime import router as realtime_router
 from app.routes.quotations import router as quotations_router
@@ -24,6 +25,7 @@ route_routers = [
     sucursales_router,      # /api/sucursales — gestión de sucursales
     usuarios_tenant_router, # /api/tenant/usuarios — usuarios por tenant
     dashboard_router,
+    notifications_router,
     devices_router,
     workshops_router,
     clients_router,

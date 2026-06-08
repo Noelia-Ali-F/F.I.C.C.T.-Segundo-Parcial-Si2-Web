@@ -1,8 +1,9 @@
 import { Injectable, NgZone, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { BehaviorSubject, Subject, lastValueFrom } from 'rxjs';
 
 import { API_BASE_URL } from '../shared/api-base';
+import { getSessionRequestContext } from '../auth/session-context';
 
 export type OfflineSyncStatus = 'pending_sync' | 'syncing' | 'synced' | 'sync_error';
 
@@ -22,9 +23,42 @@ export interface OfflineEmergency {
   longitude?: number;
   address?: string;
   zone?: string;
+  nearestWorkshopId?: number;
+  nearestWorkshopName?: string;
+  nearestWorkshopSpecialty?: string;
+  nearestWorkshopZone?: string;
+  nearestWorkshopDistanceMeters?: number;
+  routingTotalMatchingSucursales?: number;
+  routingCandidates?: EmergencyRoutingCandidate[];
   audioDurationSeconds?: number;
   photoDataUrls: string[];
   audioDataUrl?: string;
+}
+
+export interface EmergencyRoutingCandidate {
+  workshop_id: number;
+  workshop_name: string;
+  sucursal_id: number | null;
+  sucursal_nombre: string | null;
+  specialty: string | null;
+  specialties: string[];
+  zone: string | null;
+  latitude: number;
+  longitude: number;
+  distance_meters: number;
+  specialty_match: boolean;
+}
+
+export interface EmergencyRoutingPreview {
+  problem_type: string;
+  problem_type_standardized: string | null;
+  total_matching_sucursales: number;
+  nearest_workshop_id: number | null;
+  nearest_workshop_name: string | null;
+  nearest_sucursal_id: number | null;
+  nearest_sucursal_nombre: string | null;
+  nearest_workshop_distance_meters: number | null;
+  candidates: EmergencyRoutingCandidate[];
 }
 
 export interface OfflineEmergencySavePayload {
@@ -36,6 +70,13 @@ export interface OfflineEmergencySavePayload {
   longitude?: number;
   address?: string;
   zone?: string;
+  nearestWorkshopId?: number;
+  nearestWorkshopName?: string;
+  nearestWorkshopSpecialty?: string;
+  nearestWorkshopZone?: string;
+  nearestWorkshopDistanceMeters?: number;
+  routingTotalMatchingSucursales?: number;
+  routingCandidates?: EmergencyRoutingCandidate[];
   audioDurationSeconds?: number;
   photoDataUrls: string[];
   audioDataUrl?: string;
@@ -111,6 +152,28 @@ export class OfflineEmergencyService {
     });
   }
 
+  async fetchRoutingPreview(payload: {
+    problemType: string;
+    latitude: number;
+    longitude: number;
+    description?: string;
+  }): Promise<EmergencyRoutingPreview> {
+    const { headers } = getSessionRequestContext();
+    let params = new HttpParams()
+      .set('problem_type', payload.problemType)
+      .set('latitude', String(payload.latitude))
+      .set('longitude', String(payload.longitude));
+    if (payload.description?.trim()) {
+      params = params.set('description', payload.description.trim());
+    }
+    return await lastValueFrom(
+      this.http.get<EmergencyRoutingPreview>(`${API_BASE_URL}/emergencias/routing-preview`, {
+        params,
+        headers,
+      })
+    );
+  }
+
   async listEmergencies(): Promise<OfflineEmergency[]> {
     const db = await this.dbReady;
     return new Promise((resolve, reject) => {
@@ -158,8 +221,9 @@ export class OfflineEmergencyService {
 
     try {
       const formData = this.buildFormData(emergency);
+      const { headers } = getSessionRequestContext();
       const response = await lastValueFrom(
-        this.http.post<{ id: number }>(`${API_BASE_URL}/emergencias`, formData)
+        this.http.post<{ id: number }>(`${API_BASE_URL}/emergencias`, formData, { headers })
       );
       await this.patchEmergency(emergency.localId, {
         syncStatus: 'synced',
@@ -210,6 +274,13 @@ export class OfflineEmergencyService {
     if (emergency.longitude != null) fd.append('longitude', String(emergency.longitude));
     if (emergency.address) fd.append('address', emergency.address);
     if (emergency.zone) fd.append('zone', emergency.zone);
+    if (emergency.nearestWorkshopId != null) fd.append('nearest_workshop_id', String(emergency.nearestWorkshopId));
+    if (emergency.nearestWorkshopName) fd.append('nearest_workshop_name', emergency.nearestWorkshopName);
+    if (emergency.nearestWorkshopSpecialty) fd.append('nearest_workshop_specialty', emergency.nearestWorkshopSpecialty);
+    if (emergency.nearestWorkshopZone) fd.append('nearest_workshop_zone', emergency.nearestWorkshopZone);
+    if (emergency.nearestWorkshopDistanceMeters != null) {
+      fd.append('nearest_workshop_distance_meters', String(emergency.nearestWorkshopDistanceMeters));
+    }
     if (emergency.audioDurationSeconds != null)
       fd.append('audio_duration_seconds', String(emergency.audioDurationSeconds));
 
@@ -244,7 +315,9 @@ export class OfflineEmergencyService {
       const e = err as Record<string, unknown>;
       if (e['error'] && typeof e['error'] === 'object') {
         const detail = (e['error'] as Record<string, unknown>)['detail'];
-        if (detail) return String(detail);
+        if (detail) {
+          return typeof detail === 'string' ? detail : JSON.stringify(detail);
+        }
       }
       if (typeof e['message'] === 'string') return e['message'];
     }

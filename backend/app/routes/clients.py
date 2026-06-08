@@ -1,10 +1,11 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.utils import (
+    ROLE_CLIENTE,
     TokenPayload,
     get_current_user_optional,
     get_tenant_id_for_query,
@@ -64,6 +65,17 @@ class ClientRegistrationCreate(BaseModel):
     accepted_terms: bool = Field(
         default=False,
         validation_alias=AliasChoices("accepted_terms", "acceptedTerms", "termsAccepted"),
+    )
+    tenant_slug: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=100,
+        validation_alias=AliasChoices("tenant_slug", "tenantSlug"),
+    )
+    tenant_id: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("tenant_id", "tenantId"),
     )
 
     @model_validator(mode="after")
@@ -172,20 +184,52 @@ def register_client_service(payload: ClientRegistrationCreate) -> ClientRegistra
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No se permite registrar clientes con rol administrador",
         )
+    canonical_role = ROLE_CLIENTE
+    requested_tenant_slug = (payload.tenant_slug or "").strip()
+    requested_tenant_id = int(payload.tenant_id) if payload.tenant_id is not None else None
+
     try:
-        created = create_client(
-            {
-                "identity_card": payload.identity_card,
-                "full_name": payload.full_name,
-                "email": normalized_email,
-                "phone": payload.phone,
-                "password_hash": hash_password(payload.password),
-                "role": payload.role,
-                "status": "active",
-                "accepted_terms": payload.accepted_terms,
-                "tenant_id": 1,
-            }
-        )
+        if requested_tenant_slug or requested_tenant_id is not None:
+            from app.saas_master import get_tenant_by_id, get_tenant_by_slug_any
+            from app.tenant_context import clear_engine, set_context
+            from app.tenant_manager import get_tenant_engine
+
+            tenant = get_tenant_by_slug_any(requested_tenant_slug) if requested_tenant_slug else get_tenant_by_id(requested_tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TENANT_NO_ENCONTRADO")
+            if tenant.get("estado") != "activo":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="TENANT_INACTIVO")
+
+            set_context(get_tenant_engine(tenant), tenant)
+            try:
+                created = create_client(
+                    {
+                        "identity_card": payload.identity_card,
+                        "full_name": payload.full_name,
+                        "email": normalized_email,
+                        "phone": payload.phone,
+                        "password_hash": hash_password(payload.password),
+                        "role": ROLE_CLIENTE,
+                        "status": "active",
+                        "accepted_terms": payload.accepted_terms,
+                    }
+                )
+            finally:
+                clear_engine()
+        else:
+            created = create_client(
+                {
+                    "identity_card": payload.identity_card,
+                    "full_name": payload.full_name,
+                    "email": normalized_email,
+                    "phone": payload.phone,
+                    "password_hash": hash_password(payload.password),
+                    "role": canonical_role,
+                    "status": "active",
+                    "accepted_terms": payload.accepted_terms,
+                    "tenant_id": 1,
+                }
+            )
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -319,7 +363,18 @@ def remove_client_service(client_id: int) -> None:
     status_code=status.HTTP_201_CREATED,
 )
 # Aqui esta el controlador POST de registro de cliente que crea una nueva cuenta de cliente.
-def register_client(payload: ClientRegistrationCreate) -> ClientRegistrationResponse:
+def register_client(
+    payload: ClientRegistrationCreate,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+    x_tenant_id: int | None = Header(default=None, alias="X-Tenant-Id"),
+) -> ClientRegistrationResponse:
+    updates: dict[str, object] = {}
+    if x_tenant_slug and not payload.tenant_slug:
+        updates["tenant_slug"] = x_tenant_slug
+    if x_tenant_id is not None and payload.tenant_id is None:
+        updates["tenant_id"] = x_tenant_id
+    if updates:
+        payload = payload.model_copy(update=updates)
     return register_client_service(payload)
 
 

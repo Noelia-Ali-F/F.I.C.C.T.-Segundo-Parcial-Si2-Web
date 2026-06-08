@@ -16,8 +16,15 @@ import {
   isTenantSuperadmin,
   parseStoredSession,
 } from '../auth/session';
+import { getSessionRequestContext } from '../auth/session-context';
+import { NotificationsService } from '../notificaciones/notifications.service';
+import {
+  NotificationSummaryResponse,
+  SystemNotificationListResponse,
+  SystemNotificationRecord,
+} from '../notificaciones/notifications.model';
 import { RealtimeService } from '../realtime/realtime.service';
-import { ConnectionState } from '../realtime/realtime.types';
+import { ConnectionState, RealtimeEvent } from '../realtime/realtime.types';
 import { API_BASE_URL, BACKEND_BASE_URL } from '../shared/api-base';
 
 declare const L: any;
@@ -91,6 +98,18 @@ type UsuarioEmpresaFormModel = {
   sucursal_id: number | null;
 };
 
+type NotificationFilterFormModel = {
+  fecha_inicio: string;
+  fecha_fin: string;
+  recipient_user_id: string;
+  recipient_role: string;
+  event_type: string;
+  delivery_status: string;
+  read_status: string;
+  entity_type: string;
+  entity_id: string;
+};
+
 type DashboardSection =
   | 'dashboard'
   | 'workshops'
@@ -104,6 +123,7 @@ type DashboardSection =
   | 'quotation_requests'
   | 'quotation_history'
   | 'contracted_services'
+  | 'notifications'
   | 'tenants'
   | 'sucursales'
   | 'usuarios_empresa';
@@ -198,6 +218,16 @@ const LEGACY_TO_TIMELINE_STATUS_MAP: Record<LegacyEmergencyStatus, EmergencyTime
   pendiente: 'solicitud_recibida',
   activo: 'auxilio_asignado',
   rechazado: 'solicitud_cancelada',
+};
+
+const EMERGENCY_STATUS_ALIAS_MAP: Record<string, EmergencyTimelineStatus> = {
+  solicitud_aceptada: 'auxilio_asignado',
+  solicitud_rechazada: 'solicitud_cancelada',
+  taller_asignado: 'auxilio_asignado',
+  buscando_taller: 'en_revision',
+  tecnico_llego: 'tecnico_en_sitio',
+  finalizado: 'servicio_finalizado',
+  cancelado: 'solicitud_cancelada',
 };
 
 type RealtimeRefreshRequest = {
@@ -362,6 +392,9 @@ type MaintenanceRequest = {
   horaLlegada: string | null;
   latitudLlegada: number | null;
   longitudLlegada: number | null;
+  workshopCandidateStatus: string | null;
+  workshopCandidateMessage: string | null;
+  canAccept: boolean;
 };
 
 type EmergencyReport = {
@@ -401,6 +434,9 @@ type EmergencyReport = {
   assigned_technician_phone: string | null;
   assigned_technician_email: string | null;
   assigned_technician_specialty: string | null;
+  workshop_candidate_status?: string | null;
+  workshop_candidate_message?: string | null;
+  can_accept?: boolean;
   rejection_reason: string | null;
   rejected_at: string | null;
   hora_llegada: string | null;
@@ -452,6 +488,10 @@ type EmergencyTrackingActor = {
   latitude: number | null;
   longitude: number | null;
   address?: string | null;
+  source?: string | null;
+  heading?: number | null;
+  speed?: number | null;
+  accuracy?: number | null;
   last_location_at?: string | null;
 };
 
@@ -466,6 +506,11 @@ type EmergencyTrackingRoute = {
 
 type EmergencyTrackingResponse = {
   emergency_id: number;
+  tenant_id: number | null;
+  tenant_slug: string | null;
+  sucursal_id: number | null;
+  nearest_workshop_id: number | null;
+  nearest_workshop_distance_meters: number | null;
   client: EmergencyTrackingActor;
   workshop: EmergencyTrackingActor;
   technician: EmergencyTrackingActor;
@@ -828,6 +873,31 @@ type ContractedService = {
                 <span class="dashboard-submenu-bullet"></span>
                 <span>Actividad reciente</span>
                 <strong>{{ auditItems.length | number: '2.0-0' }}</strong>
+              </button>
+            </div>
+          </div>
+
+          <div class="dashboard-menu-group" *ngIf="canAccessSection('notifications')">
+            <button
+              class="dashboard-menu-link"
+              type="button"
+              [class.is-active]="selectedSection === 'notifications'"
+              (click)="selectSection('notifications')"
+            >
+              <span class="dashboard-menu-icon">◉</span>
+              <span>Notificaciones</span>
+            </button>
+
+            <div class="dashboard-submenu">
+              <button
+                class="dashboard-submenu-item"
+                type="button"
+                [class.is-active]="selectedSection === 'notifications'"
+                (click)="selectSection('notifications')"
+              >
+                <span class="dashboard-submenu-bullet"></span>
+                <span>Historial push</span>
+                <strong>{{ notificationTotal | number: '2.0-0' }}</strong>
               </button>
             </div>
           </div>
@@ -1549,6 +1619,174 @@ type ContractedService = {
                 </div>
               </article>
             </div>
+          </article>
+
+          <article class="dashboard-panel dashboard-panel-wide" *ngIf="selectedSection === 'notifications'">
+            <div class="dashboard-panel-head">
+              <div>
+                <p class="dashboard-panel-kicker">Auditoría Push</p>
+                <h2>Historial de Notificaciones</h2>
+              </div>
+              <div class="dashboard-toolbar">
+                <button class="dashboard-refresh-button" type="button" (click)="applyNotificationFilters()">
+                  Actualizar
+                </button>
+                <button class="dashboard-secondary-button" type="button" (click)="clearNotificationFilters()">
+                  Limpiar filtros
+                </button>
+              </div>
+            </div>
+
+            <section class="audit-summary-grid">
+              <article class="audit-summary-item">
+                <span>Total</span>
+                <strong>{{ notificationSummary?.total ?? notificationTotal }}</strong>
+              </article>
+              <article class="audit-summary-item">
+                <span>Enviadas</span>
+                <strong>{{ notificationSummary?.sent ?? 0 }}</strong>
+              </article>
+              <article class="audit-summary-item">
+                <span>Fallidas</span>
+                <strong>{{ notificationSummary?.failed ?? 0 }}</strong>
+              </article>
+              <article class="audit-summary-item">
+                <span>No leídas</span>
+                <strong>{{ notificationSummary?.unread ?? 0 }}</strong>
+              </article>
+            </section>
+
+            <div class="maintenance-toolbar maintenance-toolbar-compact">
+              <label class="maintenance-search">
+                <span>Fecha inicio</span>
+                <input type="datetime-local" [(ngModel)]="notificationFilters.fecha_inicio" />
+              </label>
+              <label class="maintenance-search">
+                <span>Fecha fin</span>
+                <input type="datetime-local" [(ngModel)]="notificationFilters.fecha_fin" />
+              </label>
+              <label class="maintenance-search">
+                <span>Usuario</span>
+                <input type="number" [(ngModel)]="notificationFilters.recipient_user_id" placeholder="ID usuario" />
+              </label>
+              <label class="maintenance-search">
+                <span>Evento</span>
+                <input type="text" [(ngModel)]="notificationFilters.event_type" placeholder="EMERGENCY_REGISTERED" />
+              </label>
+              <label class="maintenance-search">
+                <span>Entrega</span>
+                <select [(ngModel)]="notificationFilters.delivery_status">
+                  <option value="">Todas</option>
+                  <option value="pending">pending</option>
+                  <option value="sent">sent</option>
+                  <option value="failed">failed</option>
+                  <option value="skipped">skipped</option>
+                  <option value="retried">retried</option>
+                </select>
+              </label>
+              <label class="maintenance-search">
+                <span>Lectura</span>
+                <select [(ngModel)]="notificationFilters.read_status">
+                  <option value="">Todas</option>
+                  <option value="unread">unread</option>
+                  <option value="read">read</option>
+                </select>
+              </label>
+              <div class="maintenance-toolbar-actions">
+                <button class="dashboard-refresh-button" type="button" (click)="applyNotificationFilters()">
+                  Aplicar
+                </button>
+              </div>
+            </div>
+
+            <p class="dashboard-loading" *ngIf="isNotificationsLoading || isNotificationSummaryLoading">
+              Cargando notificaciones...
+            </p>
+            <p class="dashboard-empty" *ngIf="!isNotificationsLoading && notificationsFeedback">
+              {{ notificationsFeedback }}
+            </p>
+            <p class="dashboard-empty" *ngIf="!isNotificationsLoading && !notificationsFeedback && !notifications.length">
+              No hay notificaciones registradas para el alcance actual.
+            </p>
+
+            <div class="dashboard-table-wrap" *ngIf="!isNotificationsLoading && notifications.length">
+              <table class="dashboard-table">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Evento</th>
+                    <th>Destinatario</th>
+                    <th>Rol</th>
+                    <th>Título</th>
+                    <th>Entrega</th>
+                    <th>Lectura</th>
+                    <th>Entidad</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    *ngFor="let notification of notifications"
+                    [class.is-sync-selected]="selectedNotification?.id === notification.id"
+                    (click)="openNotificationDetail(notification)"
+                  >
+                    <td data-label="Fecha">{{ notification.created_at | date: 'short' }}</td>
+                    <td data-label="Evento">{{ notification.event_type }}</td>
+                    <td data-label="Destinatario">
+                      <div class="dashboard-table-primary">
+                        <strong>{{ notification.recipient_name || ('Usuario #' + notification.recipient_user_id) }}</strong>
+                        <span>{{ notification.recipient_email || 'Sin correo' }}</span>
+                      </div>
+                    </td>
+                    <td data-label="Rol">{{ notification.recipient_role }}</td>
+                    <td data-label="Título">{{ notification.title }}</td>
+                    <td data-label="Entrega">{{ notification.delivery_status }}</td>
+                    <td data-label="Lectura">{{ notification.read_status }}</td>
+                    <td data-label="Entidad">{{ notification.entity_type }} #{{ notification.entity_id || 's/d' }}</td>
+                    <td data-label="Acciones">
+                      <div class="maintenance-toolbar-actions">
+                        <button class="dashboard-secondary-button" type="button" (click)="markNotificationAsRead(notification, $event)">
+                          Leer
+                        </button>
+                        <button
+                          class="dashboard-refresh-button"
+                          type="button"
+                          *ngIf="notification.delivery_status === 'failed'"
+                          (click)="retryNotification(notification, $event)"
+                        >
+                          Reenviar
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p class="dashboard-empty" *ngIf="notificationDetailFeedback">
+              {{ notificationDetailFeedback }}
+            </p>
+
+            <section class="audit-timeline" *ngIf="selectedNotification">
+              <article class="audit-card">
+                <div class="audit-card-head">
+                  <strong>{{ selectedNotification.title }}</strong>
+                  <span>ID #{{ selectedNotification.id }}</span>
+                </div>
+                <p>{{ selectedNotification.body }}</p>
+                <small>
+                  {{ selectedNotification.event_type }} · {{ selectedNotification.entity_type }} #{{ selectedNotification.entity_id || 's/d' }}
+                </small>
+                <small>
+                  Entrega: {{ selectedNotification.delivery_status }} · Lectura: {{ selectedNotification.read_status }} · Retry: {{ selectedNotification.retry_count }}
+                </small>
+                <small *ngIf="selectedNotification.fcm_message_id">FCM Message ID: {{ selectedNotification.fcm_message_id }}</small>
+                <small *ngIf="selectedNotification.error_code || selectedNotification.error_message">
+                  Error: {{ selectedNotification.error_code || 'N/A' }} · {{ selectedNotification.error_message || 'Sin detalle' }}
+                </small>
+                <small *ngIf="selectedNotification.data_json">Payload: {{ selectedNotification.data_json }}</small>
+              </article>
+            </section>
           </article>
 
           <!-- ===== SECCIÓN SINCRONIZACIÓN OFFLINE ===== -->
@@ -2926,8 +3164,8 @@ type ContractedService = {
                     </button>
                   </ng-container>
 
-                  <!-- Paso 2: asignar técnico — solo cuando status es exactamente 'activo' -->
-                  <ng-container *ngIf="selectedContractedService.emergency_status === 'activo'">
+                  <!-- Paso 2: asignar técnico — disponible en cualquier estado operativo activo -->
+                  <ng-container *ngIf="statusFilterGroup($any(selectedContractedService.emergency_status)) === 'activo'">
                     <p class="svc-assignment-hint">Selecciona un técnico disponible de tu taller para esta emergencia:</p>
 
                     <div *ngIf="contractedServiceAssignableTechnicians.length === 0" class="svc-no-technicians">
@@ -4206,6 +4444,9 @@ type ContractedService = {
               </p>
               <p><strong>Prioridad:</strong> {{ selectedMaintenanceRequest.priority }}</p>
               <p><strong>Estado:</strong> {{ emergencyStatusLabel(selectedMaintenanceRequest.status) }}</p>
+              <p *ngIf="selectedMaintenanceRequest.workshopCandidateMessage" class="emergency-warning-message">
+                {{ selectedMaintenanceRequest.workshopCandidateMessage }}
+              </p>
               <p><strong>Tipo reportado:</strong> {{ selectedMaintenanceRequest.problemType }}</p>
               <p *ngIf="selectedMaintenanceRequest.standardizedProblemType">
                 <strong>Tipo estandarizado:</strong> {{ selectedMaintenanceRequest.standardizedProblemType }}
@@ -4518,7 +4759,7 @@ type ContractedService = {
                 type="button"
                 *ngIf="statusFilterGroup(selectedMaintenanceRequest.status) === 'pendiente'"
                 (click)="updateSelectedEmergencyStatus('activo')"
-                [disabled]="isUpdatingEmergencyStatus"
+                [disabled]="isUpdatingEmergencyStatus || !selectedMaintenanceRequest.canAccept"
               >
                 {{ isUpdatingEmergencyStatus ? 'Actualizando...' : 'Aceptar' }}
               </button>
@@ -4574,6 +4815,7 @@ export class DashboardPageComponent implements OnDestroy {
   private readonly http = inject(HttpClient);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly router = inject(Router);
+  private readonly notificationsService = inject(NotificationsService);
   private readonly realtimeService = inject(RealtimeService);
   private readonly workshopsApiUrl = `${API_BASE_URL}/workshops`;
   private readonly techniciansApiUrl = `${API_BASE_URL}/technicians`;
@@ -4632,12 +4874,17 @@ export class DashboardPageComponent implements OnDestroy {
   isEditingEmergencyAssignment = false;
 
   selectedSection: DashboardSection = 'dashboard';
+  notificationPage = 1;
+  readonly notificationPageSize = 20;
   isSidebarCollapsed = false;
   isExportingReport = false;
   workshops: WorkshopRegistration[] = [];
   technicians: Technician[] = [];
   clients: Client[] = [];
   tenants: TenantRecord[] = [];
+  notificationListResponse: SystemNotificationListResponse | null = null;
+  notificationSummary: NotificationSummaryResponse | null = null;
+  selectedNotification: SystemNotificationRecord | null = null;
   operationalOverview: DashboardOperationalOverview | null = null;
   isLoading = true;
   isTenantsLoading = false;
@@ -4660,6 +4907,9 @@ export class DashboardPageComponent implements OnDestroy {
   isSavingWorkshop = false;
   isUpdatingWorkshopApproval = false;
   isSavingClient = false;
+  isNotificationsLoading = false;
+  isNotificationSummaryLoading = false;
+  isNotificationActionLoading = false;
   editingTechnicianId: number | null = null;
   editingWorkshopId: number | null = null;
   editingClientId: number | null = null;
@@ -4670,7 +4920,20 @@ export class DashboardPageComponent implements OnDestroy {
   emergencyRejectionReason = '';
   workshopEditFeedback = '';
   clientEditFeedback = '';
+  notificationsFeedback = '';
+  notificationDetailFeedback = '';
   technicianFilter: TechnicianFilter = 'activos';
+  notificationFilters: NotificationFilterFormModel = {
+    fecha_inicio: '',
+    fecha_fin: '',
+    recipient_user_id: '',
+    recipient_role: '',
+    event_type: '',
+    delivery_status: '',
+    read_status: '',
+    entity_type: '',
+    entity_id: '',
+  };
   showTechnicianForm = false;
   showWorkshopEditModal = false;
   showClientEditModal = false;
@@ -5110,6 +5373,7 @@ export class DashboardPageComponent implements OnDestroy {
           'clients',
           'emergencies',
           'reports',
+          'notifications',
           'quotation_requests',
           'quotation_history',
           'contracted_services',
@@ -5125,6 +5389,7 @@ export class DashboardPageComponent implements OnDestroy {
           'clients',
           'emergencies',
           'reports',
+          'notifications',
           'quotation_requests',
           'quotation_history',
           'contracted_services',
@@ -5132,15 +5397,15 @@ export class DashboardPageComponent implements OnDestroy {
       }
 
       if (this.isTecnicoSession) {
-        return ['dashboard', 'technicians', 'emergencies', 'reports'].includes(section);
+        return ['dashboard', 'technicians', 'emergencies', 'reports', 'notifications'].includes(section);
       }
 
-      return ['dashboard', 'emergencies', 'reports'].includes(section);
+      return ['dashboard', 'emergencies', 'reports', 'notifications'].includes(section);
     }
 
     if (!this.isWorkshopSession) {
       // Admin global: accede a todo excepto secciones tenant
-      return section !== 'technicians' && section !== 'tenants' && section !== 'sucursales' && section !== 'usuarios_empresa'
+      return section !== 'technicians' && section !== 'tenants' && section !== 'sucursales' && section !== 'usuarios_empresa' && section !== 'notifications'
         ? true
         : section === 'tenants' && isGlobalAdmin(this.adminSession?.role ?? '');
     }
@@ -5363,6 +5628,151 @@ export class DashboardPageComponent implements OnDestroy {
       this.loadWorkshops();
       this.loadClients();
     }
+  }
+
+  get notifications(): SystemNotificationRecord[] {
+    return this.notificationListResponse?.items ?? [];
+  }
+
+  get notificationTotal(): number {
+    return this.notificationListResponse?.total ?? 0;
+  }
+
+  loadNotifications(page = this.notificationPage): void {
+    this.isNotificationsLoading = true;
+    this.notificationsFeedback = '';
+    this.notificationPage = page;
+
+    this.notificationsService.listNotifications(
+      this.getSessionRequestContext(),
+      this.buildNotificationFilters(),
+      page,
+      this.notificationPageSize,
+    ).subscribe({
+      next: (response) => {
+        this.notificationListResponse = response;
+        this.isNotificationsLoading = false;
+        if (this.selectedNotification) {
+          const refreshed = response.items.find((item) => item.id === this.selectedNotification?.id) ?? null;
+          this.selectedNotification = refreshed;
+        }
+      },
+      error: (error) => {
+        this.notificationListResponse = null;
+        this.selectedNotification = null;
+        this.isNotificationsLoading = false;
+        this.notificationsFeedback = error?.error?.detail ?? 'No se pudo cargar el historial de notificaciones.';
+      },
+    });
+  }
+
+  loadNotificationSummary(): void {
+    this.isNotificationSummaryLoading = true;
+    this.notificationsService.getSummary(
+      this.getSessionRequestContext(),
+      this.buildNotificationFilters(),
+    ).subscribe({
+      next: (summary) => {
+        this.notificationSummary = summary;
+        this.isNotificationSummaryLoading = false;
+      },
+      error: () => {
+        this.notificationSummary = null;
+        this.isNotificationSummaryLoading = false;
+      },
+    });
+  }
+
+  applyNotificationFilters(): void {
+    this.loadNotifications(1);
+    this.loadNotificationSummary();
+  }
+
+  clearNotificationFilters(): void {
+    this.notificationFilters = {
+      fecha_inicio: '',
+      fecha_fin: '',
+      recipient_user_id: '',
+      recipient_role: '',
+      event_type: '',
+      delivery_status: '',
+      read_status: '',
+      entity_type: '',
+      entity_id: '',
+    };
+    this.applyNotificationFilters();
+  }
+
+  openNotificationDetail(notification: SystemNotificationRecord): void {
+    this.notificationDetailFeedback = '';
+    this.notificationsService.getDetail(notification.id, this.getSessionRequestContext()).subscribe({
+      next: (detail) => {
+        this.selectedNotification = detail;
+      },
+      error: (error) => {
+        this.notificationDetailFeedback = error?.error?.detail ?? 'No se pudo cargar el detalle.';
+      },
+    });
+  }
+
+  markNotificationAsRead(notification: SystemNotificationRecord, event?: Event): void {
+    event?.stopPropagation();
+    this.isNotificationActionLoading = true;
+    this.notificationsService.markAsRead(notification.id, this.getSessionRequestContext()).subscribe({
+      next: (updated) => {
+        this.replaceNotificationInView(updated);
+        this.isNotificationActionLoading = false;
+      },
+      error: () => {
+        this.isNotificationActionLoading = false;
+      },
+    });
+  }
+
+  retryNotification(notification: SystemNotificationRecord, event?: Event): void {
+    event?.stopPropagation();
+    this.isNotificationActionLoading = true;
+    this.notificationsService.retryFailed(notification.id, this.getSessionRequestContext()).subscribe({
+      next: (updated) => {
+        this.replaceNotificationInView(updated);
+        this.loadNotificationSummary();
+        this.isNotificationActionLoading = false;
+      },
+      error: (error) => {
+        this.notificationDetailFeedback = error?.error?.detail ?? 'No se pudo reenviar la notificación.';
+        this.isNotificationActionLoading = false;
+      },
+    });
+  }
+
+  private replaceNotificationInView(updated: SystemNotificationRecord): void {
+    if (this.notificationListResponse) {
+      this.notificationListResponse = {
+        ...this.notificationListResponse,
+        items: this.notificationListResponse.items.map((item) =>
+          item.id === updated.id ? updated : item,
+        ),
+      };
+    }
+    if (this.selectedNotification?.id === updated.id) {
+      this.selectedNotification = updated;
+    }
+  }
+
+  private buildNotificationFilters(): Record<string, string | number | null> {
+    return {
+      fecha_inicio: this.notificationFilters.fecha_inicio || null,
+      fecha_fin: this.notificationFilters.fecha_fin || null,
+      recipient_user_id: this.notificationFilters.recipient_user_id
+        ? Number(this.notificationFilters.recipient_user_id)
+        : null,
+      recipient_role: this.notificationFilters.recipient_role || null,
+      event_type: this.notificationFilters.event_type || null,
+      delivery_status: this.notificationFilters.delivery_status || null,
+      read_status: this.notificationFilters.read_status || null,
+      entity_type: this.notificationFilters.entity_type || null,
+      entity_id: this.notificationFilters.entity_id ? Number(this.notificationFilters.entity_id) : null,
+    };
   }
 
   closeEmergencyModal(): void {
@@ -5856,6 +6266,75 @@ export class DashboardPageComponent implements OnDestroy {
     return null;
   }
 
+  private applyTrackingRealtimeEvent(event: RealtimeEvent): void {
+    if (event.type !== 'tracking_location_updated') {
+      return;
+    }
+
+    const selectedEmergencyId = this.selectedMaintenanceRequestId;
+    const eventEmergencyId = event.entity_id ?? event.payload?.emergency_id ?? null;
+    if (selectedEmergencyId === null || eventEmergencyId !== selectedEmergencyId || !this.selectedEmergencyTracking) {
+      return;
+    }
+
+    const latitude = this.toFiniteNumber(event.payload?.tracking_latitude);
+    const longitude = this.toFiniteNumber(event.payload?.tracking_longitude);
+    if (!this.hasValidCoordinates(latitude, longitude)) {
+      return;
+    }
+
+    const clientLatitude = this.selectedEmergencyTracking.client.latitude;
+    const clientLongitude = this.selectedEmergencyTracking.client.longitude;
+    const distanceMeters = this.calculateApproxDistanceMeters(latitude, longitude, clientLatitude, clientLongitude);
+    const durationSeconds = this.estimateTrackingDurationSeconds(distanceMeters);
+    const realtimePolyline =
+      clientLatitude !== null && clientLongitude !== null
+        ? [
+            [latitude, longitude],
+            [clientLatitude, clientLongitude],
+          ] as number[][]
+        : this.selectedEmergencyTracking.route.polyline;
+
+    this.selectedEmergencyTracking = {
+      ...this.selectedEmergencyTracking,
+      tenant_id: event.tenant_id ?? this.selectedEmergencyTracking.tenant_id,
+      tenant_slug: event.tenant_slug ?? this.selectedEmergencyTracking.tenant_slug,
+      sucursal_id: event.payload?.sucursal_id ?? event.sucursal_id ?? this.selectedEmergencyTracking.sucursal_id,
+      nearest_workshop_id:
+        event.payload?.nearest_workshop_id ?? this.selectedEmergencyTracking.nearest_workshop_id,
+      nearest_workshop_distance_meters:
+        event.payload?.nearest_workshop_distance_meters ??
+        this.selectedEmergencyTracking.nearest_workshop_distance_meters,
+      technician: {
+        ...this.selectedEmergencyTracking.technician,
+        id: event.payload?.technician_id ?? this.selectedEmergencyTracking.technician.id,
+        latitude,
+        longitude,
+        source: (event.payload?.tracking_source as string | null | undefined) ?? this.selectedEmergencyTracking.technician.source ?? null,
+        heading: this.toFiniteNumber(event.payload?.tracking_heading) ?? this.selectedEmergencyTracking.technician.heading ?? null,
+        speed: this.toFiniteNumber(event.payload?.tracking_speed) ?? this.selectedEmergencyTracking.technician.speed ?? null,
+        accuracy:
+          this.toFiniteNumber(event.payload?.tracking_accuracy) ?? this.selectedEmergencyTracking.technician.accuracy ?? null,
+        last_location_at:
+          (event.payload?.tracking_updated_at as string | null | undefined) ??
+          event.created_at ??
+          this.selectedEmergencyTracking.technician.last_location_at ??
+          null,
+      },
+      route: {
+        ...this.selectedEmergencyTracking.route,
+        distance_meters: distanceMeters,
+        distance_text: this.formatDistance(distanceMeters),
+        duration_seconds: durationSeconds,
+        duration_text: this.formatDurationText(durationSeconds),
+        polyline: realtimePolyline,
+        provider: 'realtime_haversine',
+      },
+    };
+
+    this.renderSelectedEmergencyMap();
+  }
+
   private scheduleRealtimeRefresh(request: RealtimeRefreshRequest): void {
     this.pendingRealtimeRefresh = {
       overview: this.pendingRealtimeRefresh.overview || Boolean(request.overview),
@@ -5998,6 +6477,9 @@ export class DashboardPageComponent implements OnDestroy {
       horaLlegada: report.hora_llegada ?? null,
       latitudLlegada: report.latitud_llegada ?? null,
       longitudLlegada: report.longitud_llegada ?? null,
+      workshopCandidateStatus: report.workshop_candidate_status ?? null,
+      workshopCandidateMessage: report.workshop_candidate_message?.trim() || null,
+      canAccept: Boolean(report.can_accept),
     };
   }
 
@@ -6216,6 +6698,56 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     return `${(distanceMeters / 1000).toFixed(1).replace('.', ',')} km`;
+  }
+
+  private formatDurationText(durationSeconds: number): string {
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 60) {
+      return '1 min';
+    }
+
+    const durationMinutes = Math.max(1, Math.round(durationSeconds / 60));
+    if (durationMinutes < 60) {
+      return `${durationMinutes} min`;
+    }
+
+    const hours = Math.floor(durationMinutes / 60);
+    const minutes = durationMinutes % 60;
+    return minutes === 0 ? `${hours} h` : `${hours} h ${minutes} min`;
+  }
+
+  private toFiniteNumber(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  private calculateApproxDistanceMeters(
+    originLatitude: number | null,
+    originLongitude: number | null,
+    destinationLatitude: number | null,
+    destinationLongitude: number | null,
+  ): number {
+    if (
+      !this.hasValidCoordinates(originLatitude, originLongitude) ||
+      !this.hasValidCoordinates(destinationLatitude, destinationLongitude)
+    ) {
+      return 0;
+    }
+
+    const earthRadiusMeters = 6_371_000;
+    const toRadians = (value: number) => (value * Math.PI) / 180;
+    const deltaLatitude = toRadians(destinationLatitude! - originLatitude!);
+    const deltaLongitude = toRadians(destinationLongitude! - originLongitude!);
+    const latitudeA = toRadians(originLatitude!);
+    const latitudeB = toRadians(destinationLatitude!);
+    const a =
+      Math.sin(deltaLatitude / 2) ** 2 +
+      Math.cos(latitudeA) * Math.cos(latitudeB) * Math.sin(deltaLongitude / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return Math.round(earthRadiusMeters * c);
+  }
+
+  private estimateTrackingDurationSeconds(distanceMeters: number): number {
+    const averageSpeedMetersPerSecond = 25_000 / 3_600;
+    return Math.max(60, Math.round(distanceMeters / averageSpeedMetersPerSecond));
   }
 
   formatReportPrice(price: number | null): string {
@@ -7153,6 +7685,12 @@ export class DashboardPageComponent implements OnDestroy {
       }
     }
 
+    if (section === 'notifications') {
+      this.selectedNotification = null;
+      this.loadNotifications();
+      this.loadNotificationSummary();
+    }
+
     if (section === 'tenants') {
       this.loadTenants();
     }
@@ -7214,6 +7752,8 @@ export class DashboardPageComponent implements OnDestroy {
           this.realtimeService.sendPing();
           return;
         }
+
+        this.applyTrackingRealtimeEvent(event);
 
         const refreshRequest = this.mapRealtimeEventToRefreshRequest(event);
         if (refreshRequest) {
@@ -7300,6 +7840,10 @@ export class DashboardPageComponent implements OnDestroy {
       return LEGACY_TO_TIMELINE_STATUS_MAP[status as LegacyEmergencyStatus];
     }
 
+    if (status in EMERGENCY_STATUS_ALIAS_MAP) {
+      return EMERGENCY_STATUS_ALIAS_MAP[status];
+    }
+
     return status as EmergencyTimelineStatus;
   }
 
@@ -7364,6 +7908,10 @@ export class DashboardPageComponent implements OnDestroy {
     }
 
     if (normalizedStatus === 'auxilio_en_camino') {
+      return 'tecnico_en_sitio';
+    }
+
+    if (normalizedStatus === 'tecnico_en_sitio') {
       return 'servicio_en_proceso';
     }
 
@@ -7844,6 +8392,10 @@ export class DashboardPageComponent implements OnDestroy {
   private authHeaders(): Record<string, string> {
     const token = this.adminSession?.accessToken;
     return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  private getSessionRequestContext() {
+    return getSessionRequestContext();
   }
 
   private buildAuthRequestOptions(

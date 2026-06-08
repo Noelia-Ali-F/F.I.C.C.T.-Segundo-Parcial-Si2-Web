@@ -46,7 +46,7 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=255)
     # account_type ahora admite también 'tenant' para usuarios de empresa registrada
-    account_type: str | None = Field(default=None, pattern="^(admin|workshop|client|tenant)$")
+    account_type: str | None = Field(default=None, pattern="(?i)^(admin|workshop|client|cliente|tenant)$")
 
 
 class AccountTypeLookupRequest(BaseModel):
@@ -100,7 +100,7 @@ y determina si el acceso corresponde a administrador, taller o cliente.
 """
 def login_service(payload: LoginRequest) -> LoginResponse:
     normalized_email = payload.email.lower().strip()
-    requested_account_type = payload.account_type
+    requested_account_type = _normalize_requested_account_type(payload.account_type)
     if is_protected_admin_email(normalized_email):
         ensure_login_not_locked(PROTECTED_ADMIN_ROLE, normalized_email)
         if requested_account_type and requested_account_type != PROTECTED_ADMIN_ROLE:
@@ -170,11 +170,12 @@ def login_service(payload: LoginRequest) -> LoginResponse:
             token_type="Bearer",
         )
 
+    tenant_client_login = _try_tenant_client_login(normalized_email, payload.password)
+    if tenant_client_login:
+        return tenant_client_login
+
     client = get_client_by_email(normalized_email)
     if not client or not verify_password(payload.password, str(client["password_hash"])):
-        tenant_client_login = _try_tenant_client_login(normalized_email, payload.password)
-        if tenant_client_login:
-            return tenant_client_login
         # Intenta en usuarios_tenant antes de fallar definitivamente
         tenant_login = _try_tenant_user_login(normalized_email, payload.password)
         if tenant_login:
@@ -183,18 +184,35 @@ def login_service(payload: LoginRequest) -> LoginResponse:
     if client["status"] != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta suspendida")
     client_tenant_id = int(client["tenant_id"]) if client.get("tenant_id") is not None else 1
+    resolved_role = ROLE_CLIENTE
+    tenant_slug = str(client["tenant_slug"]) if client.get("tenant_slug") else _tenant_slug_from_id(client_tenant_id)
     return LoginResponse(
         id=int(client["id"]),
         email=str(client["email"]),
         full_name=str(client["full_name"]),
         phone=str(client["phone"]),
-        role=str(client["role"]),
+        role=resolved_role,
         status=str(client["status"]),
         tenant_id=client_tenant_id,
+        tenant_slug=tenant_slug,
         requires_password_change=False,
-        access_token=create_access_token(int(client["id"]), str(client["role"]), client_tenant_id),
+        access_token=create_access_token(
+            int(client["id"]),
+            resolved_role,
+            client_tenant_id,
+            tenant_slug=tenant_slug,
+        ),
         token_type="Bearer",
     )
+
+
+def _normalize_requested_account_type(account_type: str | None) -> str | None:
+    if account_type is None:
+        return None
+    normalized = account_type.strip().lower()
+    if normalized == "cliente":
+        return "client"
+    return normalized or None
 
 
 def _find_tenant_client_by_email(email: str) -> tuple[dict[str, object], dict[str, object]] | None:
@@ -238,9 +256,10 @@ def _try_tenant_client_login(email: str, password: str) -> "LoginResponse | None
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta suspendida")
 
     reset_login_attempts(ROLE_CLIENTE, email)
+    resolved_role = _resolve_tenant_client_role(row.get("role"))
     access_token = create_access_token(
         user_id=int(row["id"]),
-        role=str(row.get("role") or ROLE_CLIENTE),
+        role=resolved_role,
         tenant_id=int(tenant["id"]),
         tenant_slug=str(tenant["slug"]),
         sucursal_id=None,
@@ -250,7 +269,7 @@ def _try_tenant_client_login(email: str, password: str) -> "LoginResponse | None
         email=str(row["email"]),
         full_name=str(row["full_name"]) if row.get("full_name") is not None else None,
         phone=str(row["phone"]) if row.get("phone") is not None else None,
-        role=str(row.get("role") or ROLE_CLIENTE),
+        role=resolved_role,
         status=str(row.get("status") or "active"),
         tenant_id=int(tenant["id"]),
         tenant_slug=str(tenant["slug"]),
@@ -259,6 +278,27 @@ def _try_tenant_client_login(email: str, password: str) -> "LoginResponse | None
         access_token=access_token,
         token_type="Bearer",
     )
+
+
+def _resolve_tenant_client_role(role: object) -> str:
+    normalized = str(role or "").strip().lower()
+    if normalized in {"", "client", "cliente", ROLE_CLIENTE.lower()}:
+        return ROLE_CLIENTE
+    return str(role).strip()
+
+
+def _tenant_slug_from_id(tenant_id: int | None) -> str | None:
+    if tenant_id is None:
+        return None
+    try:
+        from app.saas_master import get_tenant_by_id
+
+        tenant = get_tenant_by_id(int(tenant_id))
+        if tenant and tenant.get("slug"):
+            return str(tenant["slug"])
+    except Exception:
+        return None
+    return None
 
 
 def _try_tenant_user_login(email: str, password: str) -> "LoginResponse | None":

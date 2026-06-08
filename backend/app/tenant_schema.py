@@ -213,6 +213,24 @@ CREATE_EMERGENCY_STATUS_HISTORY_TENANT_SQL = text("""
 """)
 
 # =============================================================================
+# TABLA: emergency_workshop_candidates
+# =============================================================================
+CREATE_EMERGENCY_WORKSHOP_CANDIDATES_TENANT_SQL = text("""
+    CREATE TABLE IF NOT EXISTS emergency_workshop_candidates (
+        id BIGSERIAL PRIMARY KEY,
+        emergency_id BIGINT NOT NULL REFERENCES emergency_reports(id) ON DELETE CASCADE,
+        workshop_id BIGINT NOT NULL REFERENCES workshop_registrations(id) ON DELETE CASCADE,
+        sucursal_id BIGINT REFERENCES sucursales(id) ON DELETE SET NULL,
+        candidate_status VARCHAR(60) NOT NULL DEFAULT 'PENDIENTE',
+        candidate_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        responded_at TIMESTAMPTZ,
+        UNIQUE(emergency_id, workshop_id)
+    )
+""")
+
+# =============================================================================
 # TABLA: device_fcm_tokens
 # =============================================================================
 CREATE_DEVICE_FCM_TOKENS_TENANT_SQL = text("""
@@ -239,6 +257,43 @@ CREATE_NOTIFICATIONS_TENANT_SQL = text("""
         is_read BOOLEAN NOT NULL DEFAULT FALSE,
         payload_json TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+""")
+
+# =============================================================================
+# TABLA: system_notifications
+# =============================================================================
+CREATE_SYSTEM_NOTIFICATIONS_TENANT_SQL = text("""
+    CREATE TABLE IF NOT EXISTS system_notifications (
+        id BIGSERIAL PRIMARY KEY,
+        tenant_id BIGINT,
+        tenant_slug VARCHAR(100),
+        sucursal_id BIGINT REFERENCES sucursales(id) ON DELETE SET NULL,
+        recipient_user_id BIGINT NOT NULL,
+        recipient_role VARCHAR(80) NOT NULL,
+        recipient_email VARCHAR(160),
+        recipient_name VARCHAR(160),
+        event_type VARCHAR(80) NOT NULL,
+        event_source VARCHAR(80) NOT NULL DEFAULT 'system',
+        entity_type VARCHAR(80) NOT NULL,
+        entity_id BIGINT,
+        title VARCHAR(160) NOT NULL,
+        body TEXT NOT NULL,
+        data_json TEXT,
+        channel VARCHAR(40) NOT NULL DEFAULT 'push_fcm',
+        delivery_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+        read_status VARCHAR(20) NOT NULL DEFAULT 'unread',
+        error_code VARCHAR(120),
+        error_message TEXT,
+        fcm_token_id BIGINT,
+        fcm_message_id VARCHAR(255),
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        idempotency_key VARCHAR(255) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        sent_at TIMESTAMPTZ,
+        delivered_at TIMESTAMPTZ,
+        read_at TIMESTAMPTZ,
+        failed_at TIMESTAMPTZ
     )
 """)
 
@@ -346,8 +401,10 @@ TENANT_TABLES_IN_ORDER = [
     CREATE_EMERGENCY_REPORTS_TENANT_SQL,
     CREATE_EMERGENCY_ASSIGNMENTS_TENANT_SQL,
     CREATE_EMERGENCY_STATUS_HISTORY_TENANT_SQL,
+    CREATE_EMERGENCY_WORKSHOP_CANDIDATES_TENANT_SQL,
     CREATE_DEVICE_FCM_TOKENS_TENANT_SQL,
     CREATE_NOTIFICATIONS_TENANT_SQL,
+    CREATE_SYSTEM_NOTIFICATIONS_TENANT_SQL,
     CREATE_EMERGENCY_TRACKING_TENANT_SQL,
     CREATE_QUOTATION_REQUESTS_TENANT_SQL,
     CREATE_QUOTATION_REQUEST_WORKSHOPS_TENANT_SQL,
@@ -407,4 +464,37 @@ TENANT_SCHEMA_UPGRADE_STATEMENTS = [
     text("CREATE INDEX IF NOT EXISTS idx_quotation_request_history_request_id ON quotation_request_history (quotation_request_id)"),
     text("CREATE UNIQUE INDEX IF NOT EXISTS uq_quotation_request_workshops_request_workshop ON quotation_request_workshops (quotation_request_id, workshop_id)"),
     text("CREATE UNIQUE INDEX IF NOT EXISTS uq_quotation_offers_request_workshop ON quotation_offers (quotation_request_id, workshop_id)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS tenant_id BIGINT"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS tenant_slug VARCHAR(100)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS sucursal_id BIGINT REFERENCES sucursales(id) ON DELETE SET NULL"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS recipient_user_id BIGINT"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS recipient_role VARCHAR(80)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS recipient_email VARCHAR(160)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS recipient_name VARCHAR(160)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS event_type VARCHAR(80)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS event_source VARCHAR(80) NOT NULL DEFAULT 'system'"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS entity_type VARCHAR(80)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS entity_id BIGINT"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS title VARCHAR(160)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS body TEXT"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS data_json TEXT"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS channel VARCHAR(40) NOT NULL DEFAULT 'push_fcm'"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(30) NOT NULL DEFAULT 'pending'"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS read_status VARCHAR(20) NOT NULL DEFAULT 'unread'"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS error_code VARCHAR(120)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS error_message TEXT"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS fcm_token_id BIGINT"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS fcm_message_id VARCHAR(255)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255)"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ"),
+    text("ALTER TABLE system_notifications ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ"),
+    text("CREATE UNIQUE INDEX IF NOT EXISTS uq_system_notifications_idempotency_key ON system_notifications (idempotency_key)"),
+    text("CREATE INDEX IF NOT EXISTS idx_system_notifications_created_at ON system_notifications (created_at DESC, id DESC)"),
+    text("CREATE INDEX IF NOT EXISTS idx_system_notifications_recipient ON system_notifications (recipient_user_id, recipient_role)"),
+    text("CREATE INDEX IF NOT EXISTS idx_system_notifications_scope ON system_notifications (sucursal_id, event_type, delivery_status)"),
+    text("CREATE INDEX IF NOT EXISTS idx_system_notifications_entity ON system_notifications (entity_type, entity_id)"),
 ]

@@ -112,6 +112,9 @@ export class EmergenciesService {
       assignedTechnicianName: report.assigned_technician_name,
       assignedTechnicianPhone: report.assigned_technician_phone,
       assignedTechnicianSpecialty: report.assigned_technician_specialty,
+      workshopCandidateStatus: report.workshop_candidate_status ?? null,
+      workshopCandidateMessage: report.workshop_candidate_message ?? null,
+      canAccept: Boolean(report.can_accept),
     };
   }
 

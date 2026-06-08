@@ -648,6 +648,68 @@ curl -X POST http://localhost:8000/api/workshops/forgot-password \
 
 Registra una solicitud de emergencia enviada desde la app movil usando `multipart/form-data`.
 
+### `GET /api/emergencias/routing-preview`
+
+Devuelve la sucursal/taller elegible mas cercano para un problema y la lista de
+todas las sucursales compatibles dentro del tenant activo. Este endpoint esta
+pensado para que la app movil pueda mostrar:
+
+- la sucursal sugerida mas cercana
+- el listado de sucursales que si atienden ese problema
+- una previsualizacion antes de crear la emergencia
+
+#### Query params
+
+- `problem_type`: requerido
+- `latitude`: requerido
+- `longitude`: requerido
+- `description`: opcional
+
+#### Respuesta exitosa
+
+Codigo: `200 OK`
+
+```json
+{
+  "problem_type": "Batería",
+  "problem_type_standardized": "Batería",
+  "total_matching_sucursales": 2,
+  "nearest_workshop_id": 1,
+  "nearest_workshop_name": "Auxilio Norte Taller Norte",
+  "nearest_sucursal_id": 1,
+  "nearest_sucursal_nombre": "Sucursal Norte",
+  "nearest_workshop_distance_meters": 84.21,
+  "candidates": [
+    {
+      "workshop_id": 1,
+      "workshop_name": "Auxilio Norte Taller Norte",
+      "sucursal_id": 1,
+      "sucursal_nombre": "Sucursal Norte",
+      "specialty": "Batería",
+      "specialties": ["Batería", "Sistema eléctrico"],
+      "zone": "Norte",
+      "latitude": -17.7641,
+      "longitude": -63.1729,
+      "distance_meters": 84.21,
+      "specialty_match": true
+    },
+    {
+      "workshop_id": 2,
+      "workshop_name": "Auxilio Norte Taller Sur",
+      "sucursal_id": 2,
+      "sucursal_nombre": "Sucursal Sur",
+      "specialty": "Batería",
+      "specialties": ["Batería"],
+      "zone": "Sur",
+      "latitude": -17.8100,
+      "longitude": -63.2100,
+      "distance_meters": 6123.40,
+      "specialty_match": true
+    }
+  ]
+}
+```
+
 #### Campos `form-data`
 
 - `client_id`: opcional, entero mayor a 0
@@ -664,7 +726,7 @@ Registra una solicitud de emergencia enviada desde la app movil usando `multipar
 - `longitude`: opcional
 - `address`: opcional
 - `zone`: opcional
-- `nearest_workshop_id`: opcional, entero mayor a 0
+- `nearest_workshop_id`: opcional, entero mayor a 0. Si no se envia y existe una sucursal compatible, el backend resuelve automaticamente el taller elegible mas cercano
 - `nearest_workshop_name`: opcional
 - `nearest_workshop_specialty`: opcional
 - `nearest_workshop_zone`: opcional
@@ -790,6 +852,13 @@ curl -X POST http://localhost:8000/api/emergencias \
   -F "photos=@foto2.jpg" \
   -F "audio=@nota.m4a"
 ```
+
+Ejemplo recomendado para movil:
+
+1. llamar `GET /api/emergencias/routing-preview` con el problema y ubicacion
+2. mostrar `nearest_sucursal_nombre` y `candidates`
+3. crear la emergencia con `POST /api/emergencias`
+4. si la app no envia `nearest_workshop_id`, el backend igual resuelve el mas cercano sin romper compatibilidad
 
 Ejemplo con clasificacion automatica desde `Otro`:
 

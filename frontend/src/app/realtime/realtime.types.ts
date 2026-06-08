@@ -26,11 +26,18 @@ export interface RealtimeEventPayload {
   client_id?: number | null;
   assigned_technician_id?: number | null;
   nearest_workshop_id?: number | null;
+  nearest_workshop_distance_meters?: number | null;
+  tenant_id?: number | null;
+  tenant_slug?: string | null;
   sucursal_id?: number | null;
   technician_id?: number | null;
   tracking_latitude?: number | null;
   tracking_longitude?: number | null;
   tracking_source?: string | null;
+  tracking_heading?: number | null;
+  tracking_speed?: number | null;
+  tracking_accuracy?: number | null;
+  tracking_updated_at?: string | null;
   rejection_reason?: string | null;
   [key: string]: unknown;
 }

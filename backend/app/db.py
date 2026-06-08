@@ -214,6 +214,22 @@ CREATE_EMERGENCY_STATUS_HISTORY_TABLE_SQL = text(
     )
     """
 )
+CREATE_EMERGENCY_WORKSHOP_CANDIDATES_TABLE_SQL = text(
+    """
+    CREATE TABLE IF NOT EXISTS emergency_workshop_candidates (
+        id BIGSERIAL PRIMARY KEY,
+        emergency_id BIGINT NOT NULL REFERENCES emergency_reports(id) ON DELETE CASCADE,
+        workshop_id BIGINT NOT NULL REFERENCES workshop_registrations(id) ON DELETE CASCADE,
+        sucursal_id BIGINT REFERENCES sucursales(id) ON DELETE SET NULL,
+        candidate_status VARCHAR(60) NOT NULL DEFAULT 'PENDIENTE',
+        candidate_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        responded_at TIMESTAMPTZ,
+        UNIQUE(emergency_id, workshop_id)
+    )
+    """
+)
 CREATE_DEVICE_FCM_TOKENS_TABLE_SQL = text(
     """
     CREATE TABLE IF NOT EXISTS device_fcm_tokens (
@@ -249,6 +265,9 @@ CREATE_EMERGENCY_TRACKING_POINTS_TABLE_SQL = text(
         latitude DOUBLE PRECISION NOT NULL,
         longitude DOUBLE PRECISION NOT NULL,
         source VARCHAR(50) NOT NULL DEFAULT 'system',
+        heading DOUBLE PRECISION,
+        speed DOUBLE PRECISION,
+        accuracy DOUBLE PRECISION,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
     """
@@ -361,14 +380,77 @@ DELETE_VEHICLE_SQL = text("DELETE FROM vehicles WHERE id = :id AND client_id = :
 
 INSERT_EMERGENCY_REPORT_SQL = text("INSERT INTO emergency_reports (local_id, client_id, vehicle_name, vehicle_plate, problem_type, price, emergency_status, problem_type_standardized, photo_problem_type_standardized, photo_classification_confidence, photo_classification_error, description, latitude, longitude, address, zone, nearest_workshop_id, nearest_workshop_name, nearest_workshop_specialty, nearest_workshop_zone, nearest_workshop_distance_meters, audio_duration_seconds, audio_transcript, audio_transcript_status, audio_transcript_error, photo_paths, photo_urls, audio_path, audio_url, rejection_reason, rejected_at, sucursal_id) VALUES (:local_id, :client_id, :vehicle_name, :vehicle_plate, :problem_type, :price, :emergency_status, :problem_type_standardized, :photo_problem_type_standardized, :photo_classification_confidence, :photo_classification_error, :description, :latitude, :longitude, :address, :zone, :nearest_workshop_id, :nearest_workshop_name, :nearest_workshop_specialty, :nearest_workshop_zone, :nearest_workshop_distance_meters, :audio_duration_seconds, :audio_transcript, :audio_transcript_status, :audio_transcript_error, :photo_paths, :photo_urls, :audio_path, :audio_url, :rejection_reason, :rejected_at, :sucursal_id) RETURNING id, local_id, client_id, vehicle_name, vehicle_plate, problem_type, price, emergency_status, problem_type_standardized, photo_problem_type_standardized, photo_classification_confidence, photo_classification_error, description, latitude, longitude, address, zone, nearest_workshop_id, nearest_workshop_name, nearest_workshop_specialty, nearest_workshop_zone, nearest_workshop_distance_meters, audio_duration_seconds, audio_transcript, audio_transcript_status, audio_transcript_error, photo_paths, photo_urls, audio_path, audio_url, rejection_reason, rejected_at, sucursal_id, created_at")
 GET_EMERGENCY_BY_LOCAL_ID_SQL = text("SELECT er.id, er.local_id, er.client_id, er.vehicle_name, er.vehicle_plate, er.problem_type, er.price, er.emergency_status, er.problem_type_standardized, er.description, er.latitude, er.longitude, er.address, er.zone, er.nearest_workshop_id, er.nearest_workshop_name, er.photo_paths, er.photo_urls, er.audio_path, er.audio_url, er.rejection_reason, er.rejected_at, er.created_at, c.full_name AS client_name, ea.id AS assignment_id, ea.assignment_status, ea.technician_id AS assigned_technician_id, t.full_name AS assigned_technician_name, t.phone AS assigned_technician_phone, t.email AS assigned_technician_email, t.specialty AS assigned_technician_specialty FROM emergency_reports er LEFT JOIN clients c ON c.id = er.client_id LEFT JOIN emergency_assignments ea ON ea.emergency_report_id = er.id LEFT JOIN technicians t ON t.id = ea.technician_id WHERE er.local_id = :local_id LIMIT 1")
-LIST_EMERGENCY_REPORTS_SQL = text("SELECT er.id, er.local_id, er.client_id, er.vehicle_name, er.vehicle_plate, er.problem_type, er.price, er.emergency_status, er.problem_type_standardized, er.photo_problem_type_standardized, er.photo_classification_confidence, er.photo_classification_error, er.description, er.latitude, er.longitude, er.address, er.zone, er.nearest_workshop_id, er.nearest_workshop_name, er.nearest_workshop_specialty, er.nearest_workshop_zone, er.nearest_workshop_distance_meters, er.audio_duration_seconds, er.audio_transcript, er.audio_transcript_status, er.audio_transcript_error, er.photo_paths, er.photo_urls, er.audio_path, er.audio_url, er.rejection_reason, er.rejected_at, er.hora_llegada, er.latitud_llegada, er.longitud_llegada, er.sucursal_id, er.created_at, er.updated_at, c.full_name AS client_name, ea.id AS assignment_id, ea.assignment_status, ea.technician_id AS assigned_technician_id, t.full_name AS assigned_technician_name, t.phone AS assigned_technician_phone, t.email AS assigned_technician_email, t.specialty AS assigned_technician_specialty FROM emergency_reports er LEFT JOIN clients c ON c.id = er.client_id LEFT JOIN emergency_assignments ea ON ea.emergency_report_id = er.id LEFT JOIN technicians t ON t.id = ea.technician_id WHERE (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR er.nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT)) AND (CAST(:emergency_status AS VARCHAR(30)) IS NULL OR er.emergency_status = CAST(:emergency_status AS VARCHAR(30))) AND (CAST(:client_id AS BIGINT) IS NULL OR er.client_id = CAST(:client_id AS BIGINT)) AND (CAST(:technician_id AS BIGINT) IS NULL OR ea.technician_id = CAST(:technician_id AS BIGINT)) ORDER BY er.created_at DESC, er.id DESC")
-GET_EMERGENCY_REPORT_BY_ID_SQL = text("SELECT er.id, er.local_id, er.client_id, er.vehicle_name, er.vehicle_plate, er.problem_type, er.price, er.emergency_status, er.problem_type_standardized, er.photo_problem_type_standardized, er.photo_classification_confidence, er.photo_classification_error, er.description, er.latitude, er.longitude, er.address, er.zone, er.nearest_workshop_id, er.nearest_workshop_name, er.nearest_workshop_specialty, er.nearest_workshop_zone, er.nearest_workshop_distance_meters, er.audio_duration_seconds, er.audio_transcript, er.audio_transcript_status, er.audio_transcript_error, er.photo_paths, er.photo_urls, er.audio_path, er.audio_url, er.rejection_reason, er.rejected_at, er.hora_llegada, er.latitud_llegada, er.longitud_llegada, er.sucursal_id, er.created_at, er.updated_at, c.full_name AS client_name, ea.id AS assignment_id, ea.assignment_status, ea.technician_id AS assigned_technician_id, t.full_name AS assigned_technician_name, t.phone AS assigned_technician_phone, t.email AS assigned_technician_email, t.specialty AS assigned_technician_specialty FROM emergency_reports er LEFT JOIN clients c ON c.id = er.client_id LEFT JOIN emergency_assignments ea ON ea.emergency_report_id = er.id LEFT JOIN technicians t ON t.id = ea.technician_id WHERE er.id = :report_id AND (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR er.nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT)) LIMIT 1")
-GET_EMERGENCY_STATUS_FOR_UPDATE_SQL = text("SELECT id, emergency_status FROM emergency_reports WHERE id = :report_id AND (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT)) LIMIT 1")
+LIST_EMERGENCY_REPORTS_SQL = text("SELECT er.id, er.local_id, er.client_id, er.vehicle_name, er.vehicle_plate, er.problem_type, er.price, er.emergency_status, er.problem_type_standardized, er.photo_problem_type_standardized, er.photo_classification_confidence, er.photo_classification_error, er.description, er.latitude, er.longitude, er.address, er.zone, er.nearest_workshop_id, er.nearest_workshop_name, er.nearest_workshop_specialty, er.nearest_workshop_zone, er.nearest_workshop_distance_meters, er.audio_duration_seconds, er.audio_transcript, er.audio_transcript_status, er.audio_transcript_error, er.photo_paths, er.photo_urls, er.audio_path, er.audio_url, er.rejection_reason, er.rejected_at, er.hora_llegada, er.latitud_llegada, er.longitud_llegada, er.sucursal_id, er.created_at, er.updated_at, c.full_name AS client_name, ea.id AS assignment_id, ea.assignment_status, ea.technician_id AS assigned_technician_id, t.full_name AS assigned_technician_name, t.phone AS assigned_technician_phone, t.email AS assigned_technician_email, t.specialty AS assigned_technician_specialty FROM emergency_reports er LEFT JOIN clients c ON c.id = er.client_id LEFT JOIN emergency_assignments ea ON ea.emergency_report_id = er.id LEFT JOIN technicians t ON t.id = ea.technician_id WHERE (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR er.nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT) OR EXISTS (SELECT 1 FROM emergency_workshop_candidates ewc WHERE ewc.emergency_id = er.id AND ewc.workshop_id = CAST(:nearest_workshop_id AS BIGINT))) AND (CAST(:emergency_status AS VARCHAR(30)) IS NULL OR er.emergency_status = CAST(:emergency_status AS VARCHAR(30))) AND (CAST(:client_id AS BIGINT) IS NULL OR er.client_id = CAST(:client_id AS BIGINT)) AND (CAST(:technician_id AS BIGINT) IS NULL OR ea.technician_id = CAST(:technician_id AS BIGINT)) ORDER BY er.created_at DESC, er.id DESC")
+GET_EMERGENCY_REPORT_BY_ID_SQL = text("SELECT er.id, er.local_id, er.client_id, er.vehicle_name, er.vehicle_plate, er.problem_type, er.price, er.emergency_status, er.problem_type_standardized, er.photo_problem_type_standardized, er.photo_classification_confidence, er.photo_classification_error, er.description, er.latitude, er.longitude, er.address, er.zone, er.nearest_workshop_id, er.nearest_workshop_name, er.nearest_workshop_specialty, er.nearest_workshop_zone, er.nearest_workshop_distance_meters, er.audio_duration_seconds, er.audio_transcript, er.audio_transcript_status, er.audio_transcript_error, er.photo_paths, er.photo_urls, er.audio_path, er.audio_url, er.rejection_reason, er.rejected_at, er.hora_llegada, er.latitud_llegada, er.longitud_llegada, er.sucursal_id, er.created_at, er.updated_at, c.full_name AS client_name, ea.id AS assignment_id, ea.assignment_status, ea.technician_id AS assigned_technician_id, t.full_name AS assigned_technician_name, t.phone AS assigned_technician_phone, t.email AS assigned_technician_email, t.specialty AS assigned_technician_specialty FROM emergency_reports er LEFT JOIN clients c ON c.id = er.client_id LEFT JOIN emergency_assignments ea ON ea.emergency_report_id = er.id LEFT JOIN technicians t ON t.id = ea.technician_id WHERE er.id = :report_id AND (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR er.nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT) OR EXISTS (SELECT 1 FROM emergency_workshop_candidates ewc WHERE ewc.emergency_id = er.id AND ewc.workshop_id = CAST(:nearest_workshop_id AS BIGINT))) LIMIT 1")
+GET_EMERGENCY_STATUS_FOR_UPDATE_SQL = text("SELECT id, emergency_status FROM emergency_reports WHERE id = :report_id AND (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT) OR EXISTS (SELECT 1 FROM emergency_workshop_candidates ewc WHERE ewc.emergency_id = emergency_reports.id AND ewc.workshop_id = CAST(:nearest_workshop_id AS BIGINT))) LIMIT 1")
 UPDATE_EMERGENCY_STATUS_SQL = text("UPDATE emergency_reports SET emergency_status = :emergency_status, updated_at = NOW(), hora_llegada = CASE WHEN :set_hora_llegada THEN NOW() ELSE hora_llegada END, latitud_llegada = CASE WHEN :set_hora_llegada AND CAST(:latitud_llegada AS DOUBLE PRECISION) IS NOT NULL THEN CAST(:latitud_llegada AS DOUBLE PRECISION) ELSE latitud_llegada END, longitud_llegada = CASE WHEN :set_hora_llegada AND CAST(:longitud_llegada AS DOUBLE PRECISION) IS NOT NULL THEN CAST(:longitud_llegada AS DOUBLE PRECISION) ELSE longitud_llegada END, rejection_reason = CASE WHEN :set_rejection_metadata THEN :rejection_reason WHEN :clear_rejection_metadata THEN NULL ELSE rejection_reason END, rejected_at = CASE WHEN :set_rejection_metadata THEN :rejected_at WHEN :clear_rejection_metadata THEN NULL ELSE rejected_at END WHERE id = :report_id AND (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT)) RETURNING id")
 UPDATE_EMERGENCY_REASSIGNMENT_SQL = text("UPDATE emergency_reports SET nearest_workshop_id = :nearest_workshop_id, nearest_workshop_name = :nearest_workshop_name, nearest_workshop_specialty = :nearest_workshop_specialty, nearest_workshop_zone = :nearest_workshop_zone, nearest_workshop_distance_meters = :nearest_workshop_distance_meters, emergency_status = :emergency_status, sucursal_id = :sucursal_id WHERE id = :report_id RETURNING id")
 ASSIGN_EMERGENCY_TECHNICIAN_SQL = text("INSERT INTO emergency_assignments (emergency_report_id, workshop_id, technician_id, assignment_status) VALUES (:report_id, :workshop_id, :technician_id, 'asignado') ON CONFLICT (emergency_report_id) DO UPDATE SET workshop_id = EXCLUDED.workshop_id, technician_id = EXCLUDED.technician_id, assignment_status = 'asignado', updated_at = NOW() RETURNING id, emergency_report_id, workshop_id, technician_id, assignment_status, created_at, updated_at")
 DELETE_EMERGENCY_ASSIGNMENT_SQL = text("DELETE FROM emergency_assignments WHERE emergency_report_id = :report_id RETURNING id, technician_id")
-DELETE_EMERGENCY_REPORT_SQL = text("DELETE FROM emergency_reports WHERE id = :report_id AND (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT)) RETURNING id, photo_paths, photo_urls, audio_path, audio_url")
+DELETE_EMERGENCY_REPORT_SQL = text("DELETE FROM emergency_reports WHERE id = :report_id AND (CAST(:nearest_workshop_id AS BIGINT) IS NULL OR nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT) OR EXISTS (SELECT 1 FROM emergency_workshop_candidates ewc WHERE ewc.emergency_id = emergency_reports.id AND ewc.workshop_id = CAST(:nearest_workshop_id AS BIGINT))) RETURNING id, photo_paths, photo_urls, audio_path, audio_url")
+UPSERT_EMERGENCY_WORKSHOP_CANDIDATE_SQL = text(
+    """
+    INSERT INTO emergency_workshop_candidates (
+        emergency_id,
+        workshop_id,
+        sucursal_id,
+        candidate_status,
+        candidate_message
+    ) VALUES (
+        :emergency_id,
+        :workshop_id,
+        :sucursal_id,
+        :candidate_status,
+        :candidate_message
+    )
+    ON CONFLICT (emergency_id, workshop_id) DO UPDATE SET
+        sucursal_id = EXCLUDED.sucursal_id,
+        candidate_status = EXCLUDED.candidate_status,
+        candidate_message = EXCLUDED.candidate_message,
+        updated_at = NOW()
+    """
+)
+GET_EMERGENCY_WORKSHOP_CANDIDATE_SQL = text(
+    """
+    SELECT id, emergency_id, workshop_id, sucursal_id, candidate_status, candidate_message, created_at, updated_at, responded_at
+    FROM emergency_workshop_candidates
+    WHERE emergency_id = :emergency_id
+      AND (
+        (CAST(:workshop_id AS BIGINT) IS NOT NULL AND workshop_id = CAST(:workshop_id AS BIGINT))
+        OR (CAST(:workshop_id AS BIGINT) IS NULL AND CAST(:sucursal_id AS BIGINT) IS NOT NULL AND sucursal_id = CAST(:sucursal_id AS BIGINT))
+      )
+    ORDER BY id ASC
+    LIMIT 1
+    """
+)
+HAS_EMERGENCY_CANDIDATE_FOR_SUCURSAL_SQL = text(
+    """
+    SELECT 1
+    FROM emergency_workshop_candidates
+    WHERE emergency_id = :emergency_id
+      AND sucursal_id = :sucursal_id
+    LIMIT 1
+    """
+)
+MARK_EMERGENCY_CANDIDATE_WINNER_SQL = text(
+    """
+    UPDATE emergency_workshop_candidates
+    SET candidate_status = CASE
+            WHEN workshop_id = :winner_workshop_id THEN 'GANADORA'
+            ELSE 'ACEPTADA_POR_OTRA_SUCURSAL'
+        END,
+        candidate_message = CASE
+            WHEN workshop_id = :winner_workshop_id THEN NULL
+            ELSE :loser_message
+        END,
+        responded_at = CASE
+            WHEN workshop_id = :winner_workshop_id THEN NOW()
+            ELSE COALESCE(responded_at, NOW())
+        END,
+        updated_at = NOW()
+    WHERE emergency_id = :emergency_id
+    """
+)
 BACKFILL_EMERGENCY_PRICES_SQL = text("UPDATE emergency_reports SET price = CASE WHEN COALESCE(problem_type_standardized, problem_type) = 'Batería' THEN 50 WHEN COALESCE(problem_type_standardized, problem_type) = 'Neumático' THEN 50 WHEN COALESCE(problem_type_standardized, problem_type) = 'Combustible' THEN 60 WHEN COALESCE(problem_type_standardized, problem_type) = 'Motor' THEN 100 WHEN COALESCE(problem_type_standardized, problem_type) = 'Sistema eléctrico' THEN 90 WHEN COALESCE(problem_type_standardized, problem_type) = 'Accidente' THEN 150 WHEN COALESCE(problem_type_standardized, problem_type) = 'Cerrajería / llaves' THEN 80 ELSE price END WHERE price IS NULL AND COALESCE(problem_type_standardized, problem_type) IN ('Batería','Neumático','Combustible','Motor','Sistema eléctrico','Accidente','Cerrajería / llaves')")
 INSERT_EMERGENCY_STATUS_HISTORY_SQL = text("INSERT INTO emergency_status_history (emergency_id, previous_status, new_status, changed_by_role, changed_by_user_id, observation) VALUES (:emergency_id, :previous_status, :new_status, :changed_by_role, :changed_by_user_id, :observation) RETURNING id, emergency_id, previous_status, new_status, changed_by_role, changed_by_user_id, observation, created_at")
 LIST_EMERGENCY_STATUS_HISTORY_SQL = text("SELECT id, emergency_id, previous_status, new_status, changed_by_role, changed_by_user_id, observation, created_at FROM emergency_status_history WHERE emergency_id = :emergency_id ORDER BY created_at ASC, id ASC")
@@ -376,14 +458,15 @@ LIST_EMERGENCY_STATUS_HISTORY_SQL = text("SELECT id, emergency_id, previous_stat
 UPSERT_DEVICE_FCM_TOKEN_SQL = text("INSERT INTO device_fcm_tokens (user_id, fcm_token, platform, is_active) VALUES (:user_id, :fcm_token, :platform, :is_active) ON CONFLICT (fcm_token) DO UPDATE SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform, is_active = EXCLUDED.is_active, updated_at = NOW() RETURNING id, user_id, fcm_token, platform, is_active, created_at, updated_at")
 LIST_DEVICE_FCM_TOKENS_SQL = text("SELECT id, user_id, fcm_token, platform, is_active, created_at, updated_at FROM device_fcm_tokens WHERE user_id = :user_id ORDER BY updated_at DESC, id DESC")
 LIST_ACTIVE_DEVICE_FCM_TOKENS_SQL = text("SELECT id, user_id, fcm_token, platform, is_active, created_at, updated_at FROM device_fcm_tokens WHERE user_id = :user_id AND is_active = TRUE ORDER BY updated_at DESC, id DESC")
-INSERT_EMERGENCY_TRACKING_POINT_SQL = text("INSERT INTO emergency_tracking_points (emergency_id, technician_id, latitude, longitude, source) VALUES (:emergency_id, :technician_id, :latitude, :longitude, :source) RETURNING id, emergency_id, technician_id, latitude, longitude, source, created_at")
-GET_LATEST_EMERGENCY_TRACKING_POINT_SQL = text("SELECT id, emergency_id, technician_id, latitude, longitude, source, created_at FROM emergency_tracking_points WHERE emergency_id = :emergency_id ORDER BY created_at DESC, id DESC LIMIT 1")
+INSERT_EMERGENCY_TRACKING_POINT_SQL = text("INSERT INTO emergency_tracking_points (emergency_id, technician_id, latitude, longitude, source, heading, speed, accuracy) VALUES (:emergency_id, :technician_id, :latitude, :longitude, :source, :heading, :speed, :accuracy) RETURNING id, emergency_id, technician_id, latitude, longitude, source, heading, speed, accuracy, created_at")
+GET_LATEST_EMERGENCY_TRACKING_POINT_SQL = text("SELECT id, emergency_id, technician_id, latitude, longitude, source, heading, speed, accuracy, created_at FROM emergency_tracking_points WHERE emergency_id = :emergency_id ORDER BY created_at DESC, id DESC LIMIT 1")
 
 INSERT_QUOTATION_REQUEST_SQL = text("INSERT INTO quotation_requests (emergency_id, client_id, status, requested_workshops_count, requested_at, expires_at) VALUES (:emergency_id, :client_id, 'abierto', :requested_workshops_count, NOW(), :expires_at) RETURNING id, emergency_id, client_id, status, requested_workshops_count, received_offers_count, selected_offer_id, requested_at, expires_at, created_at, updated_at")
 INSERT_QUOTATION_REQUEST_WORKSHOP_SQL = text("INSERT INTO quotation_request_workshops (quotation_request_id, workshop_id, status, notified_at) VALUES (:quotation_request_id, :workshop_id, 'notificado', NOW()) RETURNING id, quotation_request_id, workshop_id, status, notified_at, created_at")
 INSERT_QUOTATION_OFFER_SQL = text("INSERT INTO quotation_offers (quotation_request_id, workshop_id, workshop_rating, price, service_description, spare_parts, labor_detail, labor_cost, spare_parts_cost, estimated_service_time, estimated_arrival_time, warranty, validity_days, observations, condiciones_servicio, status, expires_at) VALUES (:quotation_request_id, :workshop_id, :workshop_rating, :price, :service_description, :spare_parts, :labor_detail, :labor_cost, :spare_parts_cost, :estimated_service_time, :estimated_arrival_time, :warranty, :validity_days, :observations, :condiciones_servicio, 'enviada', :expires_at) RETURNING id, quotation_request_id, workshop_id, workshop_rating, price, service_description, spare_parts, labor_detail, labor_cost, spare_parts_cost, estimated_service_time, estimated_arrival_time, warranty, validity_days, observations, condiciones_servicio, status, created_at, expires_at")
 UPDATE_QUOTATION_OFFER_SQL = text("UPDATE quotation_offers SET workshop_rating = :workshop_rating, price = :price, service_description = :service_description, spare_parts = :spare_parts, labor_detail = :labor_detail, labor_cost = :labor_cost, spare_parts_cost = :spare_parts_cost, estimated_service_time = :estimated_service_time, estimated_arrival_time = :estimated_arrival_time, warranty = :warranty, validity_days = :validity_days, observations = :observations, condiciones_servicio = :condiciones_servicio, status = 'actualizada', expires_at = :expires_at WHERE id = :offer_id AND quotation_request_id = :quotation_request_id AND workshop_id = :workshop_id RETURNING id, quotation_request_id, workshop_id, workshop_rating, price, service_description, spare_parts, labor_detail, labor_cost, spare_parts_cost, estimated_service_time, estimated_arrival_time, warranty, validity_days, observations, condiciones_servicio, status, created_at, expires_at")
 GET_QUOTATION_REQUEST_BY_ID_SQL = text("SELECT id, emergency_id, client_id, status, requested_workshops_count, received_offers_count, selected_offer_id, requested_at, expires_at, created_at, updated_at FROM quotation_requests WHERE id = :id LIMIT 1")
+GET_ACTIVE_QUOTATION_REQUEST_BY_EMERGENCY_SQL = text("SELECT id, emergency_id, client_id, status, requested_workshops_count, received_offers_count, selected_offer_id, requested_at, expires_at, created_at, updated_at FROM quotation_requests WHERE emergency_id = :emergency_id AND status IN ('abierto', 'en_evaluacion', 'con_propuestas') ORDER BY created_at DESC, id DESC LIMIT 1")
 LIST_QUOTATION_REQUESTS_BY_CLIENT_SQL = text("SELECT id, emergency_id, client_id, status, requested_workshops_count, received_offers_count, selected_offer_id, requested_at, expires_at, created_at, updated_at FROM quotation_requests WHERE client_id = :client_id ORDER BY created_at DESC, id DESC")
 LIST_QUOTATION_REQUESTS_BY_WORKSHOP_SQL = text("SELECT qr.id, qr.emergency_id, qr.client_id, qr.status, qr.requested_workshops_count, qr.received_offers_count, qr.selected_offer_id, qr.requested_at, qr.expires_at, qr.created_at, qr.updated_at, qrw.status AS workshop_invitation_status, qrw.notified_at FROM quotation_requests qr JOIN quotation_request_workshops qrw ON qrw.quotation_request_id = qr.id WHERE qrw.workshop_id = :workshop_id AND qr.status IN ('abierto', 'con_propuestas', 'en_evaluacion') ORDER BY qr.created_at DESC, qr.id DESC")
 LIST_QUOTATION_REQUESTS_BY_TENANT_SQL = text(
@@ -509,7 +592,7 @@ REFRESH_QUOTATION_REQUEST_AFTER_OFFER_SQL = text(
     RETURNING id, emergency_id, client_id, status, requested_workshops_count, received_offers_count, selected_offer_id, requested_at, expires_at, created_at, updated_at
     """
 )
-GET_QUOTATION_OFFER_BY_ID_SQL = text("SELECT qo.id, qo.quotation_request_id, qo.workshop_id, qo.workshop_rating, qo.price, qo.service_description, qo.spare_parts, qo.labor_detail, qo.labor_cost, qo.spare_parts_cost, qo.estimated_service_time, qo.estimated_arrival_time, qo.warranty, qo.validity_days, qo.observations, qo.condiciones_servicio, qo.status, qo.created_at, qo.expires_at, wr.workshop_name FROM quotation_offers qo JOIN workshop_registrations wr ON wr.id = qo.workshop_id WHERE qo.id = :id LIMIT 1")
+GET_QUOTATION_OFFER_BY_ID_SQL = text("SELECT qo.id, qo.quotation_request_id, qo.workshop_id, qo.workshop_rating, qo.price, qo.service_description, qo.spare_parts, qo.labor_detail, qo.labor_cost, qo.spare_parts_cost, qo.estimated_service_time, qo.estimated_arrival_time, qo.warranty, qo.validity_days, qo.observations, qo.condiciones_servicio, qo.status, qo.created_at, qo.expires_at, wr.workshop_name, wr.sucursal_id FROM quotation_offers qo JOIN workshop_registrations wr ON wr.id = qo.workshop_id WHERE qo.id = :id LIMIT 1")
 GET_QUOTATION_REQUEST_WORKSHOP_SQL = text("SELECT id, quotation_request_id, workshop_id, status, notified_at, created_at FROM quotation_request_workshops WHERE quotation_request_id = :quotation_request_id AND workshop_id = :workshop_id LIMIT 1")
 GET_QUOTATION_OFFER_BY_REQUEST_AND_WORKSHOP_SQL = text("SELECT id, quotation_request_id, workshop_id, workshop_rating, price, service_description, spare_parts, labor_detail, labor_cost, spare_parts_cost, estimated_service_time, estimated_arrival_time, warranty, validity_days, observations, condiciones_servicio, status, created_at, expires_at FROM quotation_offers WHERE quotation_request_id = :quotation_request_id AND workshop_id = :workshop_id ORDER BY created_at DESC, id DESC LIMIT 1")
 UPDATE_QUOTATION_REQUEST_WORKSHOP_STATUS_SQL = text("UPDATE quotation_request_workshops SET status = :status WHERE quotation_request_id = :quotation_request_id AND workshop_id = :workshop_id RETURNING id, quotation_request_id, workshop_id, status, notified_at, created_at")
@@ -688,6 +771,7 @@ def init_database() -> None:
         connection.execute(CREATE_EMERGENCY_REPORTS_TABLE_SQL)
         connection.execute(CREATE_EMERGENCY_ASSIGNMENTS_TABLE_SQL)
         connection.execute(CREATE_EMERGENCY_STATUS_HISTORY_TABLE_SQL)
+        connection.execute(CREATE_EMERGENCY_WORKSHOP_CANDIDATES_TABLE_SQL)
         connection.execute(CREATE_DEVICE_FCM_TOKENS_TABLE_SQL)
         connection.execute(CREATE_NOTIFICATIONS_TABLE_SQL)
         connection.execute(CREATE_EMERGENCY_TRACKING_POINTS_TABLE_SQL)
@@ -745,6 +829,21 @@ def init_database() -> None:
         connection.execute(text("ALTER TABLE emergency_reports ADD COLUMN IF NOT EXISTS latitud_llegada DOUBLE PRECISION"))
         connection.execute(text("ALTER TABLE emergency_reports ADD COLUMN IF NOT EXISTS longitud_llegada DOUBLE PRECISION"))
         connection.execute(text("ALTER TABLE emergency_reports ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"))
+        connection.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS emergency_workshop_candidates ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "emergency_id BIGINT NOT NULL REFERENCES emergency_reports(id) ON DELETE CASCADE, "
+                "workshop_id BIGINT NOT NULL REFERENCES workshop_registrations(id) ON DELETE CASCADE, "
+                "sucursal_id BIGINT REFERENCES sucursales(id) ON DELETE SET NULL, "
+                "candidate_status VARCHAR(60) NOT NULL DEFAULT 'PENDIENTE', "
+                "candidate_message TEXT, "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "responded_at TIMESTAMPTZ, "
+                "UNIQUE(emergency_id, workshop_id))"
+            )
+        )
         connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS emergency_reports_local_id_key ON emergency_reports (local_id) WHERE local_id IS NOT NULL"))
         connection.execute(text("ALTER TABLE emergency_status_history ADD COLUMN IF NOT EXISTS previous_status VARCHAR(50)"))
         connection.execute(text("ALTER TABLE emergency_status_history ADD COLUMN IF NOT EXISTS changed_by_role VARCHAR(50)"))
@@ -769,6 +868,9 @@ def init_database() -> None:
         connection.execute(text("ALTER TABLE emergency_tracking_points ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION"))
         connection.execute(text("ALTER TABLE emergency_tracking_points ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION"))
         connection.execute(text("ALTER TABLE emergency_tracking_points ADD COLUMN IF NOT EXISTS source VARCHAR(50) NOT NULL DEFAULT 'system'"))
+        connection.execute(text("ALTER TABLE emergency_tracking_points ADD COLUMN IF NOT EXISTS heading DOUBLE PRECISION"))
+        connection.execute(text("ALTER TABLE emergency_tracking_points ADD COLUMN IF NOT EXISTS speed DOUBLE PRECISION"))
+        connection.execute(text("ALTER TABLE emergency_tracking_points ADD COLUMN IF NOT EXISTS accuracy DOUBLE PRECISION"))
         connection.execute(text("ALTER TABLE emergency_tracking_points ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"))
         connection.execute(CREATE_QUOTATION_REQUESTS_TABLE_SQL)
         connection.execute(CREATE_QUOTATION_REQUEST_WORKSHOPS_TABLE_SQL)
@@ -1351,6 +1453,76 @@ def create_emergency_report(
         return created
 
 
+def upsert_emergency_workshop_candidates(
+    emergency_id: int,
+    candidates: list[dict[str, object]],
+) -> None:
+    if not candidates:
+        return
+    with engine.begin() as connection:
+        for candidate in candidates:
+            connection.execute(
+                UPSERT_EMERGENCY_WORKSHOP_CANDIDATE_SQL,
+                {
+                    "emergency_id": emergency_id,
+                    "workshop_id": candidate["workshop_id"],
+                    "sucursal_id": candidate.get("sucursal_id"),
+                    "candidate_status": candidate.get("candidate_status") or "PENDIENTE",
+                    "candidate_message": candidate.get("candidate_message"),
+                },
+            )
+
+
+def get_emergency_workshop_candidate(
+    emergency_id: int,
+    *,
+    workshop_id: int | None = None,
+    sucursal_id: int | None = None,
+) -> dict[str, object] | None:
+    if workshop_id is None and sucursal_id is None:
+        return None
+    with engine.connect() as connection:
+        return _one_or_none(
+            connection.execute(
+                GET_EMERGENCY_WORKSHOP_CANDIDATE_SQL,
+                {
+                    "emergency_id": emergency_id,
+                    "workshop_id": workshop_id,
+                    "sucursal_id": sucursal_id,
+                },
+            )
+        )
+
+
+def emergency_has_candidate_for_sucursal(emergency_id: int, sucursal_id: int) -> bool:
+    with engine.connect() as connection:
+        row = connection.execute(
+            HAS_EMERGENCY_CANDIDATE_FOR_SUCURSAL_SQL,
+            {
+                "emergency_id": emergency_id,
+                "sucursal_id": sucursal_id,
+            },
+        ).first()
+    return row is not None
+
+
+def mark_emergency_candidate_winner(
+    emergency_id: int,
+    *,
+    winner_workshop_id: int,
+    loser_message: str,
+) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            MARK_EMERGENCY_CANDIDATE_WINNER_SQL,
+            {
+                "emergency_id": emergency_id,
+                "winner_workshop_id": winner_workshop_id,
+                "loser_message": loser_message,
+            },
+        )
+
+
 def list_emergency_reports(
     *,
     nearest_workshop_id: int | None = None,
@@ -1572,12 +1744,57 @@ def list_active_device_fcm_tokens(
 
 def create_emergency_tracking_point(payload: Mapping[str, object]) -> dict[str, object]:
     with engine.begin() as connection:
-        return _one(connection.execute(INSERT_EMERGENCY_TRACKING_POINT_SQL, payload))
+        has_heading = _table_has_column(connection, "emergency_tracking_points", "heading")
+        has_speed = _table_has_column(connection, "emergency_tracking_points", "speed")
+        has_accuracy = _table_has_column(connection, "emergency_tracking_points", "accuracy")
+        columns = ["emergency_id", "technician_id", "latitude", "longitude", "source"]
+        values = [":emergency_id", ":technician_id", ":latitude", ":longitude", ":source"]
+        returning = ["id", "emergency_id", "technician_id", "latitude", "longitude", "source"]
+        if has_heading:
+            columns.append("heading")
+            values.append(":heading")
+            returning.append("heading")
+        if has_speed:
+            columns.append("speed")
+            values.append(":speed")
+            returning.append("speed")
+        if has_accuracy:
+            columns.append("accuracy")
+            values.append(":accuracy")
+            returning.append("accuracy")
+        returning.append("created_at")
+        sql = text(
+            f"INSERT INTO emergency_tracking_points ({', '.join(columns)}) "
+            f"VALUES ({', '.join(values)}) RETURNING {', '.join(returning)}"
+        )
+        return _one(connection.execute(sql, payload))
 
 
 def get_latest_emergency_tracking_point(emergency_id: int) -> dict[str, object] | None:
     with engine.connect() as connection:
-        return _one_or_none(connection.execute(GET_LATEST_EMERGENCY_TRACKING_POINT_SQL, {"emergency_id": emergency_id}))
+        has_heading = _table_has_column(connection, "emergency_tracking_points", "heading")
+        has_speed = _table_has_column(connection, "emergency_tracking_points", "speed")
+        has_accuracy = _table_has_column(connection, "emergency_tracking_points", "accuracy")
+        select_parts = [
+            "id",
+            "emergency_id",
+            "technician_id",
+            "latitude",
+            "longitude",
+            "source",
+            "created_at",
+        ]
+        if has_heading:
+            select_parts.insert(6, "heading")
+        if has_speed:
+            select_parts.insert(7 if has_heading else 6, "speed")
+        if has_accuracy:
+            select_parts.insert(8 if has_heading and has_speed else 7 if has_heading or has_speed else 6, "accuracy")
+        sql = text(
+            f"SELECT {', '.join(select_parts)} FROM emergency_tracking_points "
+            "WHERE emergency_id = :emergency_id ORDER BY created_at DESC, id DESC LIMIT 1"
+        )
+        return _one_or_none(connection.execute(sql, {"emergency_id": emergency_id}))
 
 
 def create_emergency_status_history(payload: Mapping[str, object]) -> dict[str, object]:
@@ -1651,6 +1868,12 @@ def get_quotation_request_by_id(quotation_id: int) -> dict[str, object] | None:
     expire_quotations()
     with engine.connect() as connection:
         return _one_or_none(connection.execute(GET_QUOTATION_REQUEST_BY_ID_SQL, {"id": quotation_id}))
+
+
+def get_active_quotation_request_by_emergency(emergency_id: int) -> dict[str, object] | None:
+    expire_quotations()
+    with engine.connect() as connection:
+        return _one_or_none(connection.execute(GET_ACTIVE_QUOTATION_REQUEST_BY_EMERGENCY_SQL, {"emergency_id": emergency_id}))
 
 
 def list_quotation_requests_by_client(client_id: int) -> list[dict[str, object]]:
@@ -1979,7 +2202,7 @@ def list_emergency_reports_by_tenant(
         has_tenant_id = _table_has_column(connection, "emergency_reports", "tenant_id")
         has_sucursal_id = _table_has_column(connection, "emergency_reports", "sucursal_id")
         where_parts = [
-            "(CAST(:nearest_workshop_id AS BIGINT) IS NULL OR er.nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT))",
+            "(CAST(:nearest_workshop_id AS BIGINT) IS NULL OR er.nearest_workshop_id = CAST(:nearest_workshop_id AS BIGINT) OR EXISTS (SELECT 1 FROM emergency_workshop_candidates ewc WHERE ewc.emergency_id = er.id AND ewc.workshop_id = CAST(:nearest_workshop_id AS BIGINT)))",
             "(CAST(:emergency_status AS VARCHAR(30)) IS NULL OR er.emergency_status = CAST(:emergency_status AS VARCHAR(30)))",
             "(CAST(:client_id AS BIGINT) IS NULL OR er.client_id = CAST(:client_id AS BIGINT))",
             "(CAST(:technician_id AS BIGINT) IS NULL OR ea.technician_id = CAST(:technician_id AS BIGINT))",
@@ -1995,9 +2218,11 @@ def list_emergency_reports_by_tenant(
             params["tenant_id"] = tenant_id
         if sucursal_id is not None:
             where_parts.append(
-                "er.sucursal_id = CAST(:sucursal_id AS BIGINT)"
-                if has_sucursal_id
-                else "wr.sucursal_id = CAST(:sucursal_id AS BIGINT)"
+                (
+                    "((er.sucursal_id = CAST(:sucursal_id AS BIGINT)) OR EXISTS (SELECT 1 FROM emergency_workshop_candidates ewc WHERE ewc.emergency_id = er.id AND ewc.sucursal_id = CAST(:sucursal_id AS BIGINT)))"
+                    if has_sucursal_id
+                    else "(wr.sucursal_id = CAST(:sucursal_id AS BIGINT) OR EXISTS (SELECT 1 FROM emergency_workshop_candidates ewc WHERE ewc.emergency_id = er.id AND ewc.sucursal_id = CAST(:sucursal_id AS BIGINT)))"
+                )
             )
             params["sucursal_id"] = sucursal_id
         sql = text(
